@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Timon
+GenericName=Terminal Client
+Comment=SSH and local terminal client rendered with iced
+Exec=timon
+Icon=io.vacivor.timon
+Terminal=false
+Categories=Development;Network;System;
+Keywords=ssh;terminal;pty;sftp;
+StartupNotify=true

@@ -1,0 +1,29 @@
+app-id: io.vacivor.timon
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: timon
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=home
+modules:
+  - name: timon
+    buildsystem: simple
+    build-commands:
+      - install -D timon /app/bin/timon
+      - install -D io.vacivor.timon.desktop /app/share/applications/io.vacivor.timon.desktop
+      - install -D io.vacivor.timon.metainfo.xml /app/share/metainfo/io.vacivor.timon.metainfo.xml
+      - install -D io.vacivor.timon.svg /app/share/icons/hicolor/scalable/apps/io.vacivor.timon.svg
+    sources:
+      - type: file
+        path: timon
+      - type: file
+        path: io.vacivor.timon.desktop
+      - type: file
+        path: io.vacivor.timon.metainfo.xml
+      - type: file
+        path: io.vacivor.timon.svg

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.vacivor.timon</id>
+  <name>Timon</name>
+  <summary>SSH and local terminal client rendered with iced</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>Proprietary</project_license>
+  <developer id="io.vacivor">
+    <name>Vacivor</name>
+  </developer>
+  <launchable type="desktop-id">io.vacivor.timon.desktop</launchable>
+  <description>
+    <p>
+      Timon is a desktop SSH and local terminal client built with russh,
+      alacritty_terminal, and iced.
+    </p>
+  </description>
+  <categories>
+    <category>Development</category>
+    <category>Network</category>
+  </categories>
+  <url type="homepage">https://github.com/vacivor/timon</url>
+  <content_rating type="oars-1.1"/>
+</component>

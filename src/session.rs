@@ -113,7 +113,7 @@ fn connect_local_session(
     let mut command = build_local_command(&target.profile, &shell, &work_dir)?;
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
-    command.env("TERM_PROGRAM", "timon");
+    command.env("TERM_PROGRAM", "Timon");
     command.env("SHELL", &shell);
 
     if Path::new(&work_dir).is_dir() {

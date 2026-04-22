@@ -28,6 +28,12 @@ pub(crate) fn subscription(_app: &App) -> Subscription<Message> {
             (event::Status::Ignored, iced::Event::InputMethod(ime_event)) => {
                 Some(Message::InputMethod(window, ime_event))
             }
+            (_, iced::Event::Mouse(mouse::Event::CursorMoved { position })) => {
+                Some(Message::CursorMoved(position))
+            }
+            (event::Status::Ignored, iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))) => {
+                Some(Message::CloseDrawer)
+            }
             _ => None,
         }),
     ])
@@ -327,13 +333,9 @@ fn manage_page_view(app: &App) -> iced::widget::Container<'_, Message> {
         .style(|_| manage_sidebar_style());
 
     let content_body: Element<'_, Message> = match app.selected_menu {
-        ManageMenu::Profiles => profiles_view(app),
+        ManageMenu::Connections => connections_view(app),
         ManageMenu::Keychain => keychain_view(app),
-        ManageMenu::PortForwarding => placeholder_view(
-            "Port Forwarding",
-            "下一步可以把本地/远端端口转发规则也纳入 SQLite 管理。",
-        )
-        .into(),
+        ManageMenu::PortForwarding => port_forwarding_view(app),
         ManageMenu::Snippets => {
             placeholder_view("Snippets", "这里预留给快速命令和片段管理。").into()
         }
@@ -353,6 +355,58 @@ fn manage_page_view(app: &App) -> iced::widget::Container<'_, Message> {
         .height(Length::Fill)
         .width(Length::Fill)
         .into();
+
+    let base: Element<'_, Message> = if app.selected_menu == ManageMenu::Connections {
+        if let Some(active_connection_id) = app.active_connection_context {
+            if let Some(connection) = app
+                .connections
+                .iter()
+                .find(|connection| connection.id == active_connection_id)
+            {
+                let menu_width = 132.0;
+                let menu_left = app
+                    .active_connection_context_position
+                    .map(|position| {
+                        (position.x + 6.0)
+                            .clamp(0.0, (app.main_window_size.width - menu_width - 12.0).max(0.0))
+                    })
+                    .unwrap_or(24.0);
+                let menu_top = app
+                    .active_connection_context_position
+                    .map(|position| (position.y - TITLEBAR_HEIGHT + 6.0).max(0.0))
+                    .unwrap_or(24.0);
+
+                stack([
+                    base,
+                    mouse_area(
+                        container(Space::new().width(Length::Fill).height(Length::Fill))
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .on_press(Message::CloseDrawer)
+                    .into(),
+                    column![
+                        Space::new().height(Length::Fixed(menu_top)),
+                        row![
+                            Space::new().width(Length::Fixed(menu_left)),
+                            connection_context_menu(connection),
+                        ]
+                        .align_y(Vertical::Top)
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                ])
+                .into()
+            } else {
+                base
+            }
+        } else {
+            base
+        }
+    } else {
+        base
+    };
 
     let layered: Element<'_, Message> = if let Some(drawer) = &app.drawer {
         stack([
@@ -391,6 +445,10 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
     let Some(tab) = app.terminal_tabs.iter().find(|tab| tab.id == id) else {
         return placeholder_view("Terminal", "Tab not found").into();
     };
+
+    if let TabWorkspace::Sftp(sftp) = &tab.workspace {
+        return sftp_page_view(id, tab, sftp).into();
+    }
 
     let snapshot = tab.terminal.snapshot(&app.terminal_theme(&tab.theme_id));
     let terminal = TerminalAtlas::new(
@@ -470,28 +528,45 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
     .into()
 }
 
-fn profiles_view(app: &App) -> Element<'_, Message> {
+fn connections_view(app: &App) -> Element<'_, Message> {
     const PROFILE_GRID_COLUMN_GAP: f32 = 14.0;
     const PROFILE_GRID_ROW_GAP: f32 = 10.0;
 
     let header = row![
         column![
-            text("Profiles").size(32).color(color_text_primary()),
+            text("Connections").size(32).color(color_text_primary()),
             text("Saved SSH targets and local shells.")
                 .size(14)
                 .color(color_text_secondary()),
         ]
         .spacing(4),
         Space::new().width(Length::Fill),
-        button("New Profile")
+        button("New Group")
+            .style(light_button_style)
+            .on_press(Message::NewGroup),
+        button("New Connection")
             .style(dark_button_style)
-            .on_press(Message::NewProfile),
+            .on_press(Message::NewConnection),
     ]
     .align_y(Vertical::Center);
 
-    let cards: Element<'_, Message> = if app.profiles.is_empty() {
+    let groups: Element<'_, Message> = if app.groups.is_empty() {
+        Space::new().height(Length::Shrink).into()
+    } else {
+        column![
+            text("Groups")
+                .size(12)
+                .font(iced::Font::MONOSPACE)
+                .color(color_text_muted()),
+            column(group_rows(app)).spacing(8)
+        ]
+        .spacing(8)
+        .into()
+    };
+
+    let cards: Element<'_, Message> = if app.connections.is_empty() {
         container(
-            text("No profiles yet.")
+            text("No connections yet.")
                 .size(15)
                 .color(color_text_secondary()),
         )
@@ -500,28 +575,28 @@ fn profiles_view(app: &App) -> Element<'_, Message> {
         .into()
     } else {
         iced::widget::responsive(move |size| {
-            let available_cards_width = size.width.max(PROFILE_CARD_MIN_WIDTH);
+            let available_cards_width = size.width.max(CONNECTION_CARD_MIN_WIDTH);
             let max_fit_columns = ((available_cards_width + PROFILE_GRID_COLUMN_GAP)
-                / (PROFILE_CARD_MIN_WIDTH + PROFILE_GRID_COLUMN_GAP))
+                / (CONNECTION_CARD_MIN_WIDTH + PROFILE_GRID_COLUMN_GAP))
                 .floor()
                 .max(1.0) as usize;
-            let profile_columns = max_fit_columns.min(app.profiles.len().max(1));
-            let profile_card_width = ((available_cards_width
-                - PROFILE_GRID_COLUMN_GAP * (profile_columns.saturating_sub(1) as f32))
-                / profile_columns as f32)
-                .clamp(PROFILE_CARD_MIN_WIDTH, PROFILE_CARD_MAX_WIDTH);
-            let title_max_width = (profile_card_width - 98.0).max(48.0);
+            let connection_columns = max_fit_columns.min(app.connections.len().max(1));
+            let connection_card_width = ((available_cards_width
+                - PROFILE_GRID_COLUMN_GAP * (connection_columns.saturating_sub(1) as f32))
+                / connection_columns as f32)
+                .clamp(CONNECTION_CARD_MIN_WIDTH, CONNECTION_CARD_MAX_WIDTH);
+            let title_max_width = (connection_card_width - 98.0).max(48.0);
 
-            let rows = app.profiles.chunks(profile_columns).fold(
+            let rows = app.connections.chunks(connection_columns).fold(
                 column![].spacing(PROFILE_GRID_ROW_GAP),
                 |column, chunk| {
                     let row = chunk.iter().fold(
                         row![].spacing(PROFILE_GRID_COLUMN_GAP),
-                        |row, profile| {
+                        |row, connection| {
                             row.push(
-                                container(profile_card(app, profile, title_max_width))
-                                    .width(Length::Fixed(profile_card_width))
-                                    .height(Length::Fixed(PROFILE_CARD_HEIGHT)),
+                                container(connection_card(app, connection, title_max_width))
+                                    .width(Length::Fixed(connection_card_width))
+                                    .height(Length::Fixed(CONNECTION_CARD_HEIGHT)),
                             )
                         },
                     );
@@ -535,7 +610,7 @@ fn profiles_view(app: &App) -> Element<'_, Message> {
         .into()
     };
 
-    scrollable(column![header, cards].spacing(18))
+    scrollable(column![header, groups, cards].spacing(18))
         .height(Length::Fill)
         .into()
 }
@@ -662,6 +737,133 @@ fn logs_view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+fn port_forwarding_view(app: &App) -> Element<'_, Message> {
+    let content = app.port_forwards.iter().fold(
+        column![
+            row![
+                column![
+                    text("Port Forwarding").size(32).color(color_text_primary()),
+                    text("Local tunnel rules backed by SSH connections.")
+                        .size(14)
+                        .color(color_text_secondary()),
+                ]
+                .spacing(4),
+                Space::new().width(Length::Fill),
+                button("New Forward")
+                    .style(dark_button_style)
+                    .on_press(Message::NewPortForward),
+            ]
+            .align_y(Vertical::Center)
+        ]
+        .spacing(12),
+        |column, forward| column.push(port_forward_card(app, forward)),
+    );
+
+    scrollable(content).height(Length::Fill).into()
+}
+
+fn sftp_page_view<'a>(
+    id: u64,
+    tab: &'a TerminalTab,
+    sftp: &'a SftpTabState,
+) -> iced::widget::Container<'a, Message> {
+    let entries: Element<'a, Message> = if sftp.entries.is_empty() && !sftp.loading {
+        container(text("No entries").size(14).color(color_text_secondary())).into()
+    } else {
+        scrollable(
+            column(
+                sftp.entries
+                    .iter()
+                    .map(|entry| {
+                        button(
+                            row![
+                                text(if entry.is_dir { "DIR" } else { "FILE" })
+                                    .size(10)
+                                    .font(iced::Font::MONOSPACE)
+                                    .color(color_text_muted()),
+                                text(entry.name.clone()).size(14).color(color_text_primary()),
+                                Space::new().width(Length::Fill),
+                                text(if entry.is_dir {
+                                    "-".to_string()
+                                } else {
+                                    format_size(entry.size)
+                                })
+                                .size(12)
+                                .font(iced::Font::MONOSPACE)
+                                .color(color_text_muted()),
+                            ]
+                            .spacing(10)
+                            .align_y(Vertical::Center),
+                        )
+                        .style(light_button_style)
+                        .width(Length::Fill)
+                        .on_press(Message::SftpOpenEntry(
+                            id,
+                            entry.path.clone(),
+                            entry.is_dir,
+                        ))
+                        .into()
+                    })
+                    .collect::<Vec<Element<'a, Message>>>(),
+            )
+            .spacing(6),
+        )
+        .into()
+    };
+
+    let preview = scrollable(
+        container(
+            text(if sftp.preview.is_empty() {
+                "Select a file to preview"
+            } else {
+                &sftp.preview
+            })
+            .font(iced::Font::MONOSPACE)
+            .size(13)
+            .color(color_text_primary()),
+        )
+        .padding(14)
+        .style(|_| section_surface_style()),
+    );
+
+    container(
+        column![
+            row![
+                column![
+                    text("SFTP").size(28).color(color_text_primary()),
+                    text(&sftp.current_path).size(13).font(iced::Font::MONOSPACE).color(color_text_secondary()),
+                ]
+                .spacing(4),
+                Space::new().width(Length::Fill),
+                button("Up")
+                    .style(light_button_style)
+                    .on_press(Message::SftpOpenParent(id)),
+                button("Refresh")
+                    .style(light_button_style)
+                    .on_press(Message::SftpRefresh(id)),
+            ]
+            .align_y(Vertical::Center),
+            row![
+                container(entries)
+                    .width(Length::FillPortion(3))
+                    .height(Length::Fill)
+                    .style(|_| section_surface_style())
+                    .padding(12),
+                container(preview)
+                    .width(Length::FillPortion(2))
+                    .height(Length::Fill),
+            ]
+            .spacing(16)
+            .height(Length::Fill),
+            text(&tab.status).size(12).color(color_text_muted()),
+        ]
+        .spacing(14),
+    )
+    .padding(18)
+    .width(Length::Fill)
+    .height(Length::Fill)
+}
+
 fn placeholder_view<'a>(title: &'a str, body: &'a str) -> iced::widget::Container<'a, Message> {
     container(
         column![
@@ -677,11 +879,33 @@ fn placeholder_view<'a>(title: &'a str, body: &'a str) -> iced::widget::Containe
     .height(Length::Fill)
 }
 
+fn group_chip<'a>(app: &'a App, group: &'a Group) -> Element<'a, Message> {
+    button(
+        row![
+            text(group_display_name(app, group))
+                .size(12)
+                .color(color_text_primary()),
+            text(format!("#{}", group.id))
+                .size(10)
+                .font(iced::Font::MONOSPACE)
+                .color(color_text_muted()),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center),
+    )
+    .style(light_button_style)
+    .padding([6, 10])
+    .on_press(Message::EditGroup(group.id))
+    .into()
+}
+
 fn drawer_view<'a>(app: &'a App, drawer: &'a DrawerState) -> iced::widget::Container<'a, Message> {
     let content: Element<'_, _> = match drawer {
-        DrawerState::Profile(editor) => profile_drawer(app, editor).into(),
+        DrawerState::Connection(editor) => connection_drawer(app, editor).into(),
+        DrawerState::Group(editor) => group_drawer(app, editor).into(),
         DrawerState::Key(editor) => key_drawer(editor).into(),
         DrawerState::Identity(editor) => identity_drawer(app, editor).into(),
+        DrawerState::PortForward(editor) => port_forward_drawer(app, editor).into(),
     };
 
     container(
@@ -695,31 +919,31 @@ fn drawer_view<'a>(app: &'a App, drawer: &'a DrawerState) -> iced::widget::Conta
     .height(Length::Fill)
 }
 
-fn profile_card<'a>(
+fn connection_card<'a>(
     app: &'a App,
-    profile: &'a Profile,
+    connection: &'a Connection,
     title_max_width: f32,
 ) -> Element<'a, Message> {
-    let type_label = if profile.profile_type == ProfileType::Local {
+    let type_label = if connection.connection_type == ConnectionType::Local {
         "local"
     } else {
         "ssh"
     };
-    let connection_label = if profile.profile_type == ProfileType::Local {
-        format!("Local PTY · {}", shell_display_name(&profile.shell_path))
+    let connection_label = if connection.connection_type == ConnectionType::Local {
+        format!("Local PTY · {}", shell_display_name(&connection.shell_path))
     } else {
         format!(
             "{}@{}:{}",
-            empty_as_dash(&profile.display_username),
-            empty_as_dash(&profile.host),
-            profile.port
+            empty_as_dash(&connection.display_username),
+            empty_as_dash(&connection.host),
+            connection.port
         )
     };
 
     let body = column![
         row![
             column![
-                text(truncate_to_width(&profile.name, title_max_width, 18.0))
+                text(truncate_to_width(&connection.name, title_max_width, 18.0))
                     .size(18)
                     .wrapping(iced::widget::text::Wrapping::None)
                     .color(color_text_primary()),
@@ -740,11 +964,29 @@ fn profile_card<'a>(
             .style(|_| status_badge_style()),
         ],
         row![
+            if let Some(group) = app
+                .groups
+                .iter()
+                .find(|group| Some(group.id) == connection.group_id)
+            {
+                container(
+                    text(group_display_name(app, group))
+                        .size(11)
+                        .font(iced::Font::MONOSPACE)
+                        .color(color_text_muted()),
+                )
+                .padding([4, 10])
+                .style(|_| neutral_badge_style())
+            } else {
+                container(Space::new().width(Length::Shrink).height(Length::Shrink))
+                    .padding(0)
+                    .style(|_| bordered_surface(Color::TRANSPARENT, 0.0, Color::TRANSPARENT, Shadow::default()))
+            },
             container(
-                text(if profile.profile_type == ProfileType::Local {
-                    shell_display_name(&profile.shell_path)
+                text(if connection.connection_type == ConnectionType::Local {
+                    shell_display_name(&connection.shell_path)
                 } else {
-                    empty_as_dash(&profile.host)
+                    empty_as_dash(&connection.host)
                 })
                 .size(11)
                 .font(iced::Font::MONOSPACE)
@@ -753,14 +995,14 @@ fn profile_card<'a>(
             .padding([4, 10])
             .style(|_| neutral_badge_style()),
             container(
-                text(if profile.profile_type == ProfileType::Local {
-                    if profile.work_dir.trim().is_empty() {
+                text(if connection.connection_type == ConnectionType::Local {
+                    if connection.work_dir.trim().is_empty() {
                         "Home".to_string()
                     } else {
-                        profile.work_dir.clone()
+                        connection.work_dir.clone()
                     }
                 } else {
-                    empty_as_dash(&profile.display_username)
+                    empty_as_dash(&connection.display_username)
                 })
                 .size(11)
                 .font(iced::Font::MONOSPACE)
@@ -773,36 +1015,15 @@ fn profile_card<'a>(
     ]
     .spacing(10);
 
-    let shell: Element<'a, Message> = mouse_area(
+    mouse_area(
         container(body)
             .padding([14, 16])
             .width(Length::Fill)
-            .height(Length::Fixed(PROFILE_CARD_HEIGHT))
+            .height(Length::Fixed(CONNECTION_CARD_HEIGHT))
             .style(|_| capsule_surface_style()),
     )
-    .on_right_press(Message::OpenProfileContext(profile.id))
-    .into();
-
-    if app.active_profile_context == Some(profile.id) {
-        stack([
-            shell,
-            opaque(
-                container(
-                    row![
-                        Space::new().width(Length::Fill),
-                        profile_context_menu(profile.id),
-                    ]
-                    .align_y(Vertical::Top),
-                )
-                .padding(10)
-                .width(Length::Fill)
-                .height(Length::Fill),
-            ),
-        ])
-        .into()
-    } else {
-        shell
-    }
+    .on_right_press(Message::OpenConnectionContext(connection.id))
+    .into()
 }
 
 fn truncate_to_width(value: &str, max_width: f32, font_size: f32) -> String {
@@ -854,24 +1075,39 @@ fn estimated_char_width(ch: char) -> f32 {
     }
 }
 
-fn profile_context_menu(profile_id: i64) -> Element<'static, Message> {
-    container(
-        column![
-            button("Connect")
+fn connection_context_menu(connection: &Connection) -> Element<'static, Message> {
+    let mut actions = column![
+        button("Connect")
+            .width(Length::Fill)
+            .style(light_button_style)
+            .on_press(Message::ConnectConnection(connection.id)),
+    ]
+    .spacing(6);
+
+    if connection.connection_type == ConnectionType::Ssh {
+        actions = actions.push(
+            button("Open SFTP")
                 .width(Length::Fill)
                 .style(light_button_style)
-                .on_press(Message::ConnectProfile(profile_id)),
+                .on_press(Message::OpenSftpConnection(connection.id)),
+        );
+    }
+
+    actions = actions
+        .push(
             button("Duplicate")
                 .width(Length::Fill)
                 .style(light_button_style)
-                .on_press(Message::DuplicateProfile(profile_id)),
+                .on_press(Message::DuplicateConnection(connection.id)),
+        )
+        .push(
             button("Edit")
                 .width(Length::Fill)
                 .style(light_button_style)
-                .on_press(Message::EditProfile(profile_id)),
-        ]
-        .spacing(6),
-    )
+                .on_press(Message::EditConnection(connection.id)),
+        );
+
+    container(actions)
     .padding(8)
     .width(Length::Fixed(132.0))
     .style(|_| context_menu_style())
@@ -971,11 +1207,23 @@ fn identity_card<'a>(app: &'a App, identity: &'a Identity) -> Element<'a, Messag
         .into()
 }
 
-fn profile_drawer<'a>(
+fn connection_drawer<'a>(
     app: &'a App,
-    editor: &'a ProfileEditor,
+    editor: &'a ConnectionEditor,
 ) -> iced::widget::Container<'a, Message> {
     let type_options = vec!["ssh".to_string(), "local".to_string()];
+    let group_option_pairs = std::iter::once(("None".to_string(), "None".to_string()))
+        .chain(app.groups.iter().map(|group| {
+            (
+                group_display_name(app, group),
+                group.id.to_string(),
+            )
+        }))
+        .collect::<Vec<_>>();
+    let group_options = group_option_pairs
+        .iter()
+        .map(|(label, _)| label.clone())
+        .collect::<Vec<_>>();
     let key_options = std::iter::once("None".to_string())
         .chain(app.keys.iter().map(|key| key.id.to_string()))
         .collect::<Vec<_>>();
@@ -1007,8 +1255,21 @@ fn profile_drawer<'a>(
     shell_options.insert(0, "Login Shell".to_string());
     let selected_type = type_options
         .iter()
-        .find(|option| option.as_str() == editor.profile_type.as_str())
+        .find(|option| option.as_str() == editor.connection_type.as_str())
         .cloned();
+    let selected_group = editor
+        .group_id
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .and_then(|group_id| {
+            app.groups
+                .iter()
+                .find(|group| group.id == group_id)
+                .map(|group| group_display_name(app, group))
+        })
+        .or_else(|| group_options.first().cloned());
+    let group_option_pairs_for_input = group_option_pairs.clone();
     let selected_shell = if editor.shell_path.trim().is_empty() {
         Some("Login Shell".to_string())
     } else {
@@ -1023,7 +1284,7 @@ fn profile_drawer<'a>(
             key_options,
             selected_key,
             "Select a key",
-            |value| Message::ProfileFieldChanged(ProfileField::KeyId, value),
+            |value| Message::ConnectionFieldChanged(ConnectionField::KeyId, value),
         )
         .into(),
         labeled_pick_list_owned(
@@ -1031,23 +1292,23 @@ fn profile_drawer<'a>(
             identity_options,
             selected_identity,
             "Select an identity",
-            |value| Message::ProfileFieldChanged(ProfileField::IdentityId, value),
+            |value| Message::ConnectionFieldChanged(ConnectionField::IdentityId, value),
         )
         .into(),
         labeled_input("Host", &editor.host, |value| {
-            Message::ProfileFieldChanged(ProfileField::Host, value)
+            Message::ConnectionFieldChanged(ConnectionField::Host, value)
         })
         .into(),
         labeled_input("Port", &editor.port, |value| {
-            Message::ProfileFieldChanged(ProfileField::Port, value)
+            Message::ConnectionFieldChanged(ConnectionField::Port, value)
         })
         .into(),
         labeled_input("Username", &editor.username, |value| {
-            Message::ProfileFieldChanged(ProfileField::Username, value)
+            Message::ConnectionFieldChanged(ConnectionField::Username, value)
         })
         .into(),
         labeled_input("Password", &editor.password, |value| {
-            Message::ProfileFieldChanged(ProfileField::Password, value)
+            Message::ConnectionFieldChanged(ConnectionField::Password, value)
         })
         .into(),
     ];
@@ -1057,33 +1318,44 @@ fn profile_drawer<'a>(
             shell_options,
             selected_shell,
             "Select a shell",
-            |value| Message::ProfileFieldChanged(ProfileField::ShellPath, value),
+            |value| Message::ConnectionFieldChanged(ConnectionField::ShellPath, value),
         )
         .into(),
         labeled_input("Work Dir", &editor.work_dir, |value| {
-            Message::ProfileFieldChanged(ProfileField::WorkDir, value)
+            Message::ConnectionFieldChanged(ConnectionField::WorkDir, value)
         })
         .into(),
     ];
 
     let mut content = column![
         labeled_input("Name", &editor.name, |value| {
-            Message::ProfileFieldChanged(ProfileField::Name, value)
+            Message::ConnectionFieldChanged(ConnectionField::Name, value)
         }),
         labeled_pick_list_owned(
             "Type",
             type_options,
             selected_type,
             "Select a type",
-            |value| { Message::ProfileTypeChanged(value) }
+            |value| { Message::ConnectionTypeChanged(value) }
         ),
-        labeled_input("Group ID", &editor.group_id, |value| {
-            Message::ProfileFieldChanged(ProfileField::GroupId, value)
-        }),
+        labeled_pick_list_owned(
+            "Group",
+            group_options,
+            selected_group,
+            "Select a group",
+            move |value| {
+                let next = group_option_pairs_for_input
+                    .iter()
+                    .find(|(label, _)| *label == value)
+                    .map(|(_, id)| id.clone())
+                    .unwrap_or_else(|| "None".to_string());
+                Message::ConnectionFieldChanged(ConnectionField::GroupId, next)
+            },
+        ),
     ]
     .spacing(10);
 
-    let section_fields = if editor.profile_type == ProfileType::Local {
+    let section_fields = if editor.connection_type == ConnectionType::Local {
         local_fields
     } else {
         ssh_fields
@@ -1094,13 +1366,11 @@ fn profile_drawer<'a>(
     }
 
     content = content
-        .push(labeled_input("Theme ID", &editor.theme_id, |value| {
-            Message::ProfileFieldChanged(ProfileField::ThemeId, value)
-        }))
+        .push(theme_gallery(app, editor))
         .push(labeled_input(
             "Startup Command",
             &editor.startup_command,
-            |value| Message::ProfileFieldChanged(ProfileField::StartupCommand, value),
+            |value| Message::ConnectionFieldChanged(ConnectionField::StartupCommand, value),
         ))
         .push(
             row![
@@ -1109,12 +1379,184 @@ fn profile_drawer<'a>(
                     .on_press(Message::CloseDrawer),
                 button("Save")
                     .style(dark_button_style)
-                    .on_press(Message::SaveProfile),
+                    .on_press(Message::SaveConnection),
             ]
             .spacing(10),
         );
 
-    drawer_shell("Edit Profile", content)
+    drawer_shell("Edit Connection", content)
+}
+
+fn theme_gallery<'a>(app: &'a App, editor: &'a ConnectionEditor) -> Element<'a, Message> {
+    let themes = std::iter::once((
+        "default".to_string(),
+        "settings.json".to_string(),
+        ["#fafafa".to_string(), "#383a42".to_string(), "#4078f2".to_string()],
+    ))
+    .chain(app.terminal_themes.iter().map(|theme| {
+        (
+            theme.id.clone(),
+            theme.path.display().to_string(),
+            [
+                theme.colors.primary.background.clone(),
+                theme.colors.primary.foreground.clone(),
+                theme.colors.cursor.cursor.clone(),
+            ],
+        )
+    }))
+    .collect::<Vec<_>>();
+
+    column![
+        text("Theme").size(12).font(iced::Font::MONOSPACE).color(color_text_muted()),
+        row(
+            themes
+                .into_iter()
+                .map(|(id, path, colors)| {
+                    let active = editor.theme_id == id;
+                    let label = id.clone();
+                    button(
+                        column![
+                            text(label)
+                                .size(13)
+                                .color(if active { color_focus() } else { color_text_primary() }),
+                            text(path)
+                                .size(10)
+                                .font(iced::Font::MONOSPACE)
+                                .color(color_text_muted()),
+                            row(
+                                colors
+                                    .into_iter()
+                                    .map(|hex| {
+                                        container(Space::new().width(Length::Fixed(12.0)).height(Length::Fixed(12.0)))
+                                            .style(move |_| {
+                                                bordered_surface(
+                                                    parse_hex_color(&hex).unwrap_or(Color::BLACK),
+                                                    999.0,
+                                                    Color::TRANSPARENT,
+                                                    Shadow::default(),
+                                                )
+                                            })
+                                            .into()
+                                    })
+                                    .collect::<Vec<Element<'_, Message>>>()
+                            )
+                            .spacing(6),
+                        ]
+                        .spacing(6)
+                    )
+                    .padding([10, 12])
+                    .style(move |theme, status| {
+                        if active {
+                            floating_menu_button_style(true, theme, status)
+                        } else {
+                            light_button_style(theme, status)
+                        }
+                    })
+                    .on_press(Message::ConnectionFieldChanged(ConnectionField::ThemeId, id))
+                    .into()
+                })
+                .collect::<Vec<Element<'_, Message>>>()
+        )
+        .spacing(10)
+        .wrap(),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn group_drawer<'a>(app: &'a App, editor: &'a GroupEditor) -> iced::widget::Container<'a, Message> {
+    let parent_option_pairs = std::iter::once(("None".to_string(), "None".to_string()))
+        .chain(
+            app.groups
+                .iter()
+                .filter(|group| group.parent_id.is_none() && Some(group.id) != editor.id)
+                .map(|group| (group.name.clone(), group.id.to_string())),
+        )
+        .collect::<Vec<_>>();
+    let parent_options = parent_option_pairs
+        .iter()
+        .map(|(label, _)| label.clone())
+        .collect::<Vec<_>>();
+    let selected_parent = editor
+        .parent_id
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .and_then(|parent_id| {
+            app.groups
+                .iter()
+                .find(|group| group.id == parent_id)
+                .map(|group| group.name.clone())
+        })
+        .or_else(|| parent_options.first().cloned());
+    let parent_option_pairs_for_input = parent_option_pairs.clone();
+    drawer_shell(
+        "Edit Group",
+        column![
+            labeled_input("Name", &editor.name, |value| {
+                Message::GroupFieldChanged(GroupField::Name, value)
+            }),
+            labeled_pick_list_owned(
+                "Parent Group",
+                parent_options,
+                selected_parent,
+                "Optional parent group",
+                move |value| {
+                    let next = parent_option_pairs_for_input
+                        .iter()
+                        .find(|(label, _)| *label == value)
+                        .map(|(_, id)| id.clone())
+                        .unwrap_or_else(|| "None".to_string());
+                    Message::GroupFieldChanged(GroupField::ParentId, next)
+                },
+            ),
+            row![
+                button("Close")
+                    .style(light_button_style)
+                    .on_press(Message::CloseDrawer),
+                button("Save")
+                    .style(dark_button_style)
+                    .on_press(Message::SaveGroup),
+            ]
+            .spacing(10),
+        ]
+        .spacing(10),
+    )
+}
+
+fn group_display_name(app: &App, group: &Group) -> String {
+    if let Some(parent_id) = group.parent_id {
+        if let Some(parent) = app.groups.iter().find(|candidate| candidate.id == parent_id) {
+            return format!("{} / {}", parent.name, group.name);
+        }
+    }
+
+    group.name.clone()
+}
+
+fn group_rows<'a>(app: &'a App) -> Vec<Element<'a, Message>> {
+    let mut rows = Vec::new();
+
+    for parent in app.groups.iter().filter(|group| group.parent_id.is_none()) {
+        rows.push(row![group_chip(app, parent)].spacing(8).into());
+
+        let children = app
+            .groups
+            .iter()
+            .filter(|group| group.parent_id == Some(parent.id))
+            .map(|group| group_chip(app, group))
+            .collect::<Vec<_>>();
+
+        if !children.is_empty() {
+            rows.push(
+                container(row(children).spacing(8).wrap())
+                    .padding([0, 18])
+                    .into(),
+            );
+        }
+    }
+
+    rows
 }
 
 fn key_drawer(editor: &KeyEditor) -> iced::widget::Container<'_, Message> {
@@ -1202,6 +1644,150 @@ fn identity_drawer<'a>(
     )
 }
 
+fn port_forward_card<'a>(app: &'a App, forward: &'a PortForward) -> Element<'a, Message> {
+    let running = app.port_forward_runtimes.contains_key(&forward.id) || forward.enabled;
+    container(
+        column![
+            row![
+                column![
+                    text(if forward.label.trim().is_empty() { "Forward" } else { &forward.label })
+                        .size(18)
+                        .color(color_text_primary()),
+                    text(format!(
+                        "{}:{} → {}:{}",
+                        forward.bind_address,
+                        forward.bind_port,
+                        forward.destination_host,
+                        forward.destination_port
+                    ))
+                    .size(13)
+                    .font(iced::Font::MONOSPACE)
+                    .color(color_text_secondary()),
+                ]
+                .spacing(4),
+                Space::new().width(Length::Fill),
+                button(if running { "Stop" } else { "Start" })
+                    .style(if running { light_button_style } else { dark_button_style })
+                    .on_press(Message::TogglePortForward(forward.id, !running)),
+                button("Edit")
+                    .style(light_button_style)
+                    .on_press(Message::EditPortForward(forward.id)),
+                button("Delete")
+                    .style(light_button_style)
+                    .on_press(Message::DeletePortForward(forward.id)),
+            ]
+            .align_y(Vertical::Center),
+            text(format!(
+                "{} via {}",
+                forward.forward_type.label(),
+                if forward.connection_name.trim().is_empty() {
+                    "Unassigned SSH Connection"
+                } else {
+                    &forward.connection_name
+                }
+            ))
+            .size(12)
+            .color(color_text_muted()),
+        ]
+        .spacing(10),
+    )
+    .padding(16)
+    .style(|_| card_surface_style())
+    .into()
+}
+
+fn port_forward_drawer<'a>(
+    app: &'a App,
+    editor: &'a PortForwardEditor,
+) -> iced::widget::Container<'a, Message> {
+    let type_options = vec![
+        "local".to_string(),
+        "remote".to_string(),
+        "dynamic".to_string(),
+    ];
+    let connection_options = std::iter::once("None".to_string())
+        .chain(
+            app.connections
+                .iter()
+                .filter(|connection| connection.connection_type == ConnectionType::Ssh)
+                .map(|connection| connection.id.to_string()),
+        )
+        .collect::<Vec<_>>();
+    let selected_type = type_options
+        .iter()
+        .find(|option| option.as_str() == editor.forward_type.as_str())
+        .cloned();
+    let selected_connection = connection_options
+        .iter()
+        .find(|option| option.as_str() == editor.connection_id.as_str())
+        .cloned()
+        .or_else(|| connection_options.first().cloned());
+
+    drawer_shell(
+        "Edit Port Forward",
+        column![
+            labeled_input("Label", &editor.label, |value| {
+                Message::PortForwardFieldChanged(PortForwardField::Label, value)
+            }),
+            labeled_pick_list_owned("Type", type_options, selected_type, "Select a type", |value| {
+                Message::PortForwardTypeChanged(value)
+            }),
+            labeled_input("Bind Address", &editor.bind_address, |value| {
+                Message::PortForwardFieldChanged(PortForwardField::BindAddress, value)
+            }),
+            labeled_input("Bind Port", &editor.bind_port, |value| {
+                Message::PortForwardFieldChanged(PortForwardField::BindPort, value)
+            }),
+            labeled_pick_list_owned(
+                "SSH Connection",
+                connection_options,
+                selected_connection,
+                "Select a connection",
+                |value| Message::PortForwardFieldChanged(PortForwardField::ConnectionId, value),
+            ),
+            labeled_input("Destination Host", &editor.destination_host, |value| {
+                Message::PortForwardFieldChanged(PortForwardField::DestinationHost, value)
+            }),
+            labeled_input("Destination Port", &editor.destination_port, |value| {
+                Message::PortForwardFieldChanged(PortForwardField::DestinationPort, value)
+            }),
+            row![
+                button("Close")
+                    .style(light_button_style)
+                    .on_press(Message::CloseDrawer),
+                button("Save")
+                    .style(dark_button_style)
+                    .on_press(Message::SavePortForward),
+            ]
+            .spacing(10),
+        ]
+        .spacing(10),
+    )
+}
+
+fn format_size(size: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    if size >= MB {
+        format!("{:.1} MB", size as f64 / MB as f64)
+    } else if size >= KB {
+        format!("{:.1} KB", size as f64 / KB as f64)
+    } else {
+        format!("{size} B")
+    }
+}
+
+fn parse_hex_color(value: &str) -> Option<Color> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let red = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let green = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let blue = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color::from_rgb8(red, green, blue))
+}
+
 fn drawer_shell<'a>(
     title: &'a str,
     content: iced::widget::Column<'a, Message>,
@@ -1284,7 +1870,7 @@ fn terminal_tab_buttons<'a>(
                 "…"
             } else if tab.theme_id == "sftp" {
                 "S"
-            } else if tab.profile_type == ProfileType::Local {
+            } else if tab.connection_type == ConnectionType::Local {
                 "L"
             } else {
                 "T"
@@ -1497,7 +2083,7 @@ fn labeled_pick_list_owned<'a>(
     options: Vec<String>,
     selected: Option<String>,
     placeholder: &'a str,
-    on_select: impl Fn(String) -> Message + 'static + Copy,
+    on_select: impl Fn(String) -> Message + 'static,
 ) -> iced::widget::Column<'a, Message> {
     column![
         text(label)

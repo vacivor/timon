@@ -740,7 +740,9 @@ where
     ) {
         let state = tree.state.downcast_ref::<TerminalAtlasState>();
         let mut snapshot = self.snapshot.clone();
-        if snapshot.cursor_blinking && !state.cursor_visible {
+        if !self.focused {
+            snapshot.show_cursor = false;
+        } else if snapshot.cursor_blinking && !state.cursor_visible {
             snapshot.show_cursor = false;
         }
         renderer.draw_primitive(
@@ -1380,18 +1382,18 @@ impl TerminalTheme {
         }
 
         Self {
-            background: parse_hex_color(&colors.background)
-                .unwrap_or_else(|| parse_hex_color(&fallback.background).unwrap()),
-            foreground: parse_hex_color(&colors.foreground)
-                .unwrap_or_else(|| parse_hex_color(&fallback.foreground).unwrap()),
-            cursor_color: parse_hex_color(&colors.cursor_color)
-                .unwrap_or_else(|| parse_hex_color(&fallback.cursor_color).unwrap()),
-            cursor_text: parse_hex_color(&colors.cursor_text)
-                .unwrap_or_else(|| parse_hex_color(&fallback.cursor_text).unwrap()),
-            selection_background: parse_hex_color(&colors.selection_background)
-                .unwrap_or_else(|| parse_hex_color(&fallback.selection_background).unwrap()),
-            selection_foreground: parse_hex_color(&colors.selection_foreground)
-                .unwrap_or_else(|| parse_hex_color(&fallback.selection_foreground).unwrap()),
+            background: parse_hex_color(&colors.primary.background)
+                .unwrap_or_else(|| parse_hex_color(&fallback.primary.background).unwrap()),
+            foreground: parse_hex_color(&colors.primary.foreground)
+                .unwrap_or_else(|| parse_hex_color(&fallback.primary.foreground).unwrap()),
+            cursor_color: parse_hex_color(&colors.cursor.cursor)
+                .unwrap_or_else(|| parse_hex_color(&fallback.cursor.cursor).unwrap()),
+            cursor_text: parse_hex_color(&colors.cursor.text)
+                .unwrap_or_else(|| parse_hex_color(&fallback.cursor.text).unwrap()),
+            selection_background: parse_hex_color(&colors.selection.background)
+                .unwrap_or_else(|| parse_hex_color(&fallback.selection.background).unwrap()),
+            selection_foreground: parse_hex_color(&colors.selection.text)
+                .unwrap_or_else(|| parse_hex_color(&fallback.selection.text).unwrap()),
             ansi,
         }
     }

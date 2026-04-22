@@ -8,7 +8,7 @@ fn handle(bytes: &'static [u8], cache: &'static OnceLock<svg::Handle>) -> svg::H
         .clone()
 }
 
-fn profiles_handle() -> svg::Handle {
+fn connections_handle() -> svg::Handle {
     static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
     handle(include_bytes!("../../assets/lucide/monitor.svg"), &HANDLE)
 }
@@ -54,7 +54,7 @@ pub(crate) fn manage_menu_icon(
     color: Color,
 ) -> iced::widget::svg::Svg<'static, Theme> {
     let handle = match menu {
-        ManageMenu::Profiles => profiles_handle(),
+        ManageMenu::Connections => connections_handle(),
         ManageMenu::Keychain => keychain_handle(),
         ManageMenu::PortForwarding => port_forwarding_handle(),
         ManageMenu::Snippets => snippets_handle(),

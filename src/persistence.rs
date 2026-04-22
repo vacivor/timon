@@ -1,17 +1,22 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection as SqliteConnection, params};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::models::{Identity, Key as SshKey, KnownHostEntry, Profile, ProfileType};
+use crate::models::{
+    Connection, ConnectionType, Group, Identity, Key as SshKey, KnownHostEntry, PortForward,
+    PortForwardType,
+};
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub database: PathBuf,
     pub settings: PathBuf,
     pub known_hosts: PathBuf,
+    pub themes: PathBuf,
 }
 
 impl AppPaths {
@@ -21,13 +26,17 @@ impl AppPaths {
         let database = root.join("timon.sqlite3");
         let settings = root.join("settings.json");
         let known_hosts = root.join("known_hosts");
+        let themes = root.join("themes");
 
         fs::create_dir_all(&root).with_context(|| format!("无法创建目录 {}", root.display()))?;
+        fs::create_dir_all(&themes)
+            .with_context(|| format!("无法创建目录 {}", themes.display()))?;
 
         Ok(Self {
             database,
             settings,
             known_hosts,
+            themes,
         })
     }
 }
@@ -190,14 +199,29 @@ impl Default for CursorSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalColors {
-    pub background: String,
-    pub foreground: String,
-    pub cursor_color: String,
-    pub cursor_text: String,
-    pub selection_background: String,
-    pub selection_foreground: String,
+    pub primary: TerminalPrimaryColors,
+    pub cursor: TerminalCursorColors,
+    pub selection: TerminalSelectionColors,
     pub normal: TerminalAnsiGroup,
     pub bright: TerminalAnsiGroup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalPrimaryColors {
+    pub background: String,
+    pub foreground: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalCursorColors {
+    pub cursor: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalSelectionColors {
+    pub background: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,12 +268,18 @@ impl TerminalAnsiGroup {
 impl TerminalColors {
     pub fn atom_one_light() -> Self {
         Self {
-            background: "#fafafa".into(),
-            foreground: "#383a42".into(),
-            cursor_color: "#526fff".into(),
-            cursor_text: "#fafafa".into(),
-            selection_background: "#dbe9ff".into(),
-            selection_foreground: "#1f2329".into(),
+            primary: TerminalPrimaryColors {
+                background: "#fafafa".into(),
+                foreground: "#383a42".into(),
+            },
+            cursor: TerminalCursorColors {
+                cursor: "#526fff".into(),
+                text: "#fafafa".into(),
+            },
+            selection: TerminalSelectionColors {
+                background: "#dbe9ff".into(),
+                text: "#1f2329".into(),
+            },
             normal: TerminalAnsiGroup {
                 black: "#000000".into(),
                 red: "#e45649".into(),
@@ -272,6 +302,121 @@ impl TerminalColors {
             },
         }
     }
+
+    pub fn atom_one_dark() -> Self {
+        Self {
+            primary: TerminalPrimaryColors {
+                background: "#1e2127".into(),
+                foreground: "#abb2bf".into(),
+            },
+            cursor: TerminalCursorColors {
+                cursor: "#61afef".into(),
+                text: "#1e2127".into(),
+            },
+            selection: TerminalSelectionColors {
+                background: "#3e4451".into(),
+                text: "#d7dae0".into(),
+            },
+            normal: TerminalAnsiGroup {
+                black: "#1e2127".into(),
+                red: "#e06c75".into(),
+                green: "#98c379".into(),
+                yellow: "#e5c07b".into(),
+                blue: "#61afef".into(),
+                magenta: "#c678dd".into(),
+                cyan: "#56b6c2".into(),
+                white: "#abb2bf".into(),
+            },
+            bright: TerminalAnsiGroup {
+                black: "#5c6370".into(),
+                red: "#e06c75".into(),
+                green: "#98c379".into(),
+                yellow: "#e5c07b".into(),
+                blue: "#61afef".into(),
+                magenta: "#c678dd".into(),
+                cyan: "#56b6c2".into(),
+                white: "#ffffff".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TerminalThemeEntry {
+    pub id: String,
+    pub path: PathBuf,
+    pub colors: TerminalColors,
+}
+
+#[derive(Debug, Deserialize)]
+struct ThemeFile {
+    colors: TerminalColors,
+}
+
+pub fn builtin_terminal_themes() -> &'static [TerminalThemeEntry] {
+    static THEMES: OnceLock<Vec<TerminalThemeEntry>> = OnceLock::new();
+    THEMES
+        .get_or_init(|| {
+            vec![
+                TerminalThemeEntry {
+                    id: "atom-one-light".into(),
+                    path: PathBuf::from("assets/themes/atom-one-light.toml"),
+                    colors: parse_builtin_theme(
+                        include_str!("../assets/themes/atom-one-light.toml"),
+                        TerminalColors::atom_one_light,
+                    ),
+                },
+                TerminalThemeEntry {
+                    id: "atom-one-dark".into(),
+                    path: PathBuf::from("assets/themes/atom-one-dark.toml"),
+                    colors: parse_builtin_theme(
+                        include_str!("../assets/themes/atom-one-dark.toml"),
+                        TerminalColors::atom_one_dark,
+                    ),
+                },
+            ]
+        })
+        .as_slice()
+}
+
+pub fn builtin_terminal_theme_by_id(theme_id: &str) -> Option<&'static TerminalThemeEntry> {
+    builtin_terminal_themes()
+        .iter()
+        .find(|theme| theme.id == theme_id)
+}
+
+pub fn load_custom_terminal_themes(dir: &Path) -> Vec<TerminalThemeEntry> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut themes = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter_map(|path| {
+            let id = path.file_stem()?.to_str()?.to_string();
+            let source = fs::read_to_string(&path).ok()?;
+            let file = toml::from_str::<ThemeFile>(&source).ok()?;
+            Some(TerminalThemeEntry {
+                id,
+                path,
+                colors: file.colors,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    themes.sort_by(|left, right| left.id.cmp(&right.id));
+    themes
+}
+
+fn parse_builtin_theme(
+    source: &str,
+    fallback: impl FnOnce() -> TerminalColors,
+) -> TerminalColors {
+    toml::from_str::<ThemeFile>(source)
+        .map(|file| file.colors)
+        .unwrap_or_else(|_| fallback())
 }
 
 pub struct Database {
@@ -279,7 +424,7 @@ pub struct Database {
 }
 
 fn ensure_column(
-    connection: &Connection,
+    connection: &SqliteConnection,
     table: &str,
     column: &str,
     definition: &str,
@@ -312,8 +457,8 @@ impl Database {
         Ok(database)
     }
 
-    fn open(&self) -> Result<Connection> {
-        Connection::open(&self.path)
+    fn open(&self) -> Result<SqliteConnection> {
+        SqliteConnection::open(&self.path)
             .with_context(|| format!("无法打开数据库 {}", self.path.display()))
     }
 
@@ -321,7 +466,7 @@ impl Database {
         let connection = self.open()?;
         connection.execute_batch(
             r#"
-            CREATE TABLE IF NOT EXISTS profiles (
+            CREATE TABLE IF NOT EXISTS connections (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 group_id INTEGER,
@@ -353,18 +498,36 @@ impl Database {
                 password TEXT NOT NULL DEFAULT '',
                 key_id INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                parent_id INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS port_forwards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL DEFAULT '',
+                type TEXT NOT NULL DEFAULT 'local',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                bind_address TEXT NOT NULL DEFAULT '127.0.0.1',
+                bind_port INTEGER NOT NULL DEFAULT 0,
+                connection_id INTEGER,
+                destination_host TEXT NOT NULL DEFAULT '',
+                destination_port INTEGER NOT NULL DEFAULT 0
+            );
             "#,
         )?;
-        ensure_column(&connection, "profiles", "key_id", "INTEGER")?;
+        ensure_column(&connection, "connections", "key_id", "INTEGER")?;
         ensure_column(
             &connection,
-            "profiles",
+            "connections",
             "shell_path",
             "TEXT NOT NULL DEFAULT ''",
         )?;
         ensure_column(
             &connection,
-            "profiles",
+            "connections",
             "work_dir",
             "TEXT NOT NULL DEFAULT ''",
         )?;
@@ -375,63 +538,65 @@ impl Database {
             "certificate",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        ensure_column(&connection, "groups", "parent_id", "INTEGER")?;
+        ensure_column(&connection, "port_forwards", "connection_id", "INTEGER")?;
         Ok(())
     }
 
     fn seed_defaults(&self) -> Result<()> {
-        if self.list_profiles()?.is_empty() {
-            let mut ssh = Profile {
+        if self.list_connections()?.is_empty() {
+            let mut ssh = Connection {
                 name: "Example SSH".into(),
                 host: "127.0.0.1".into(),
                 username: "root".into(),
-                ..Profile::default()
+                ..Connection::default()
             };
-            self.save_profile(&mut ssh)?;
+            self.save_connection(&mut ssh)?;
 
-            let mut local = Profile {
+            let mut local = Connection {
                 name: "Local Shell".into(),
                 host: "localhost".into(),
                 theme_id: "atom-one-light".into(),
-                profile_type: ProfileType::Local,
+                connection_type: ConnectionType::Local,
                 port: 0,
-                ..Profile::default()
+                ..Connection::default()
             };
-            self.save_profile(&mut local)?;
+            self.save_connection(&mut local)?;
         }
 
         Ok(())
     }
 
-    pub fn list_profiles(&self) -> Result<Vec<Profile>> {
+    pub fn list_connections(&self) -> Result<Vec<Connection>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
             "SELECT
-                profiles.id,
-                profiles.name,
-                profiles.group_id,
-                profiles.key_id,
-                COALESCE(profiles.key_id, identities.key_id) AS effective_key_id,
-                profiles.identity_id,
-                profiles.host,
-                profiles.port,
-                profiles.username,
+                connections.id,
+                connections.name,
+                connections.group_id,
+                connections.key_id,
+                COALESCE(connections.key_id, identities.key_id) AS effective_key_id,
+                connections.identity_id,
+                connections.host,
+                connections.port,
+                connections.username,
                 CASE
-                    WHEN trim(profiles.username) <> '' THEN profiles.username
+                    WHEN trim(connections.username) <> '' THEN connections.username
                     ELSE COALESCE(identities.username, '')
                 END AS display_username,
-                profiles.password,
-                profiles.theme_id,
-                profiles.shell_path,
-                profiles.work_dir,
-                profiles.startup_command,
-                profiles.type
-             FROM profiles
-             LEFT JOIN identities ON identities.id = profiles.identity_id
-             ORDER BY profiles.id DESC",
+                connections.password,
+                connections.theme_id,
+                connections.shell_path,
+                connections.work_dir,
+                connections.startup_command,
+                connections.type
+             FROM connections
+             LEFT JOIN identities ON identities.id = connections.identity_id
+             ORDER BY connections.id DESC",
         )?;
 
         let rows = statement.query_map([], |row| {
-            Ok(Profile {
+            Ok(Connection {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 group_id: row.get(2)?,
@@ -447,7 +612,7 @@ impl Database {
                 shell_path: row.get(12)?,
                 work_dir: row.get(13)?,
                 startup_command: row.get(14)?,
-                profile_type: ProfileType::from(row.get_ref(15)?.as_str()?),
+                connection_type: ConnectionType::from(row.get_ref(15)?.as_str()?),
             })
         })?;
 
@@ -495,50 +660,108 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn save_profile(&self, profile: &mut Profile) -> Result<()> {
+    pub fn list_groups(&self) -> Result<Vec<Group>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT id, name, parent_id
+             FROM groups
+             ORDER BY COALESCE(parent_id, id), parent_id IS NOT NULL, name COLLATE NOCASE ASC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(Group {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                parent_id: row.get(2)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn list_port_forwards(&self) -> Result<Vec<PortForward>> {
+        let connection = self.open()?;
+        let mut statement = connection.prepare(
+            "SELECT
+                pf.id,
+                pf.label,
+                pf.type,
+                pf.enabled,
+                pf.bind_address,
+                pf.bind_port,
+                pf.connection_id,
+                COALESCE(connections.name, '') AS connection_name,
+                pf.destination_host,
+                pf.destination_port
+             FROM port_forwards pf
+             LEFT JOIN connections ON connections.id = pf.connection_id
+             ORDER BY pf.id DESC",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(PortForward {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                forward_type: PortForwardType::from(row.get_ref(2)?.as_str()?),
+                enabled: row.get::<_, i64>(3)? != 0,
+                bind_address: row.get(4)?,
+                bind_port: row.get(5)?,
+                connection_id: row.get(6)?,
+                connection_name: row.get(7)?,
+                destination_host: row.get(8)?,
+                destination_port: row.get(9)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn save_connection(&self, connection_model: &mut Connection) -> Result<()> {
         let connection = self.open()?;
 
-        if profile.id == 0 {
+        if connection_model.id == 0 {
             connection.execute(
-                "INSERT INTO profiles (name, group_id, key_id, identity_id, host, port, username, password, theme_id, shell_path, work_dir, startup_command, type)
+                "INSERT INTO connections (name, group_id, key_id, identity_id, host, port, username, password, theme_id, shell_path, work_dir, startup_command, type)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
-                    profile.name,
-                    profile.group_id,
-                    profile.key_id,
-                    profile.identity_id,
-                    profile.host,
-                    profile.port,
-                    profile.username,
-                    profile.password,
-                    profile.theme_id,
-                    profile.shell_path,
-                    profile.work_dir,
-                    profile.startup_command,
-                    profile.profile_type.as_str(),
+                    connection_model.name,
+                    connection_model.group_id,
+                    connection_model.key_id,
+                    connection_model.identity_id,
+                    connection_model.host,
+                    connection_model.port,
+                    connection_model.username,
+                    connection_model.password,
+                    connection_model.theme_id,
+                    connection_model.shell_path,
+                    connection_model.work_dir,
+                    connection_model.startup_command,
+                    connection_model.connection_type.as_str(),
                 ],
             )?;
-            profile.id = connection.last_insert_rowid();
+            connection_model.id = connection.last_insert_rowid();
         } else {
             connection.execute(
-                "UPDATE profiles
+                "UPDATE connections
                  SET name=?1, group_id=?2, key_id=?3, identity_id=?4, host=?5, port=?6, username=?7, password=?8, theme_id=?9, shell_path=?10, work_dir=?11, startup_command=?12, type=?13
                  WHERE id=?14",
                 params![
-                    profile.name,
-                    profile.group_id,
-                    profile.key_id,
-                    profile.identity_id,
-                    profile.host,
-                    profile.port,
-                    profile.username,
-                    profile.password,
-                    profile.theme_id,
-                    profile.shell_path,
-                    profile.work_dir,
-                    profile.startup_command,
-                    profile.profile_type.as_str(),
-                    profile.id,
+                    connection_model.name,
+                    connection_model.group_id,
+                    connection_model.key_id,
+                    connection_model.identity_id,
+                    connection_model.host,
+                    connection_model.port,
+                    connection_model.username,
+                    connection_model.password,
+                    connection_model.theme_id,
+                    connection_model.shell_path,
+                    connection_model.work_dir,
+                    connection_model.startup_command,
+                    connection_model.connection_type.as_str(),
+                    connection_model.id,
                 ],
             )?;
         }
@@ -603,6 +826,72 @@ impl Database {
             )?;
         }
 
+        Ok(())
+    }
+
+    pub fn save_group(&self, group: &mut Group) -> Result<()> {
+        let connection = self.open()?;
+
+        if group.id == 0 {
+            connection.execute(
+                "INSERT INTO groups (name, parent_id) VALUES (?1, ?2)",
+                params![group.name.trim(), group.parent_id],
+            )?;
+            group.id = connection.last_insert_rowid();
+        } else {
+            connection.execute(
+                "UPDATE groups SET name=?1, parent_id=?2 WHERE id=?3",
+                params![group.name.trim(), group.parent_id, group.id],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn save_port_forward(&self, forward: &mut PortForward) -> Result<()> {
+        let connection = self.open()?;
+
+        if forward.id == 0 {
+            connection.execute(
+                "INSERT INTO port_forwards (label, type, enabled, bind_address, bind_port, connection_id, destination_host, destination_port)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    forward.label,
+                    forward.forward_type.as_str(),
+                    i64::from(forward.enabled as i32),
+                    forward.bind_address,
+                    forward.bind_port,
+                    forward.connection_id,
+                    forward.destination_host,
+                    forward.destination_port,
+                ],
+            )?;
+            forward.id = connection.last_insert_rowid();
+        } else {
+            connection.execute(
+                "UPDATE port_forwards
+                 SET label=?1, type=?2, enabled=?3, bind_address=?4, bind_port=?5, connection_id=?6, destination_host=?7, destination_port=?8
+                 WHERE id=?9",
+                params![
+                    forward.label,
+                    forward.forward_type.as_str(),
+                    i64::from(forward.enabled as i32),
+                    forward.bind_address,
+                    forward.bind_port,
+                    forward.connection_id,
+                    forward.destination_host,
+                    forward.destination_port,
+                    forward.id,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn delete_port_forward(&self, id: i64) -> Result<()> {
+        let connection = self.open()?;
+        connection.execute("DELETE FROM port_forwards WHERE id=?1", params![id])?;
         Ok(())
     }
 }

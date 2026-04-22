@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProfileType {
+pub enum ConnectionType {
     Ssh,
     Local,
 }
 
-impl ProfileType {
+impl ConnectionType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ssh => "ssh",
@@ -15,13 +15,13 @@ impl ProfileType {
     }
 }
 
-impl Default for ProfileType {
+impl Default for ConnectionType {
     fn default() -> Self {
         Self::Ssh
     }
 }
 
-impl From<&str> for ProfileType {
+impl From<&str> for ConnectionType {
     fn from(value: &str) -> Self {
         match value {
             "local" => Self::Local,
@@ -31,7 +31,7 @@ impl From<&str> for ProfileType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Profile {
+pub struct Connection {
     pub id: i64,
     pub name: String,
     pub group_id: Option<i64>,
@@ -47,14 +47,14 @@ pub struct Profile {
     pub shell_path: String,
     pub work_dir: String,
     pub startup_command: String,
-    pub profile_type: ProfileType,
+    pub connection_type: ConnectionType,
 }
 
-impl Default for Profile {
+impl Default for Connection {
     fn default() -> Self {
         Self {
             id: 0,
-            name: "New Profile".into(),
+            name: "New Connection".into(),
             group_id: None,
             key_id: None,
             effective_key_id: None,
@@ -68,7 +68,7 @@ impl Default for Profile {
             shell_path: String::new(),
             work_dir: String::new(),
             startup_command: String::new(),
-            profile_type: ProfileType::Ssh,
+            connection_type: ConnectionType::Ssh,
         }
     }
 }
@@ -103,6 +103,103 @@ pub struct Identity {
     pub key_id: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Group {
+    pub id: i64,
+    pub name: String,
+    pub parent_id: Option<i64>,
+}
+
+impl Default for Group {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: "New Group".into(),
+            parent_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PortForwardType {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+impl PortForwardType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+            Self::Dynamic => "dynamic",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Local => "Local",
+            Self::Remote => "Remote",
+            Self::Dynamic => "Dynamic",
+        }
+    }
+}
+
+impl Default for PortForwardType {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+impl From<&str> for PortForwardType {
+    fn from(value: &str) -> Self {
+        match value {
+            "remote" => Self::Remote,
+            "dynamic" => Self::Dynamic,
+            _ => Self::Local,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForward {
+    pub id: i64,
+    pub label: String,
+    pub forward_type: PortForwardType,
+    pub enabled: bool,
+    pub bind_address: String,
+    pub bind_port: i64,
+    pub connection_id: Option<i64>,
+    pub connection_name: String,
+    pub destination_host: String,
+    pub destination_port: i64,
+}
+
+impl Default for PortForward {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            label: "New Forward".into(),
+            forward_type: PortForwardType::Local,
+            enabled: false,
+            bind_address: "127.0.0.1".into(),
+            bind_port: 0,
+            connection_id: None,
+            connection_name: String::new(),
+            destination_host: String::new(),
+            destination_port: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SftpEntry {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
 impl Default for Identity {
     fn default() -> Self {
         Self {
@@ -117,7 +214,7 @@ impl Default for Identity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManageMenu {
-    Profiles,
+    Connections,
     Keychain,
     PortForwarding,
     Snippets,
@@ -128,7 +225,7 @@ pub enum ManageMenu {
 
 impl ManageMenu {
     pub const ALL: [ManageMenu; 7] = [
-        ManageMenu::Profiles,
+        ManageMenu::Connections,
         ManageMenu::Keychain,
         ManageMenu::PortForwarding,
         ManageMenu::Snippets,
@@ -139,7 +236,7 @@ impl ManageMenu {
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Profiles => "Profiles",
+            Self::Connections => "Connections",
             Self::Keychain => "Keychain",
             Self::PortForwarding => "Port Forwarding",
             Self::Snippets => "Snippets",

@@ -7,6 +7,7 @@ use iced::event;
 use iced::keyboard;
 use iced::keyboard::Key;
 use iced::keyboard::key::{Code, Physical};
+use iced::mouse;
 use iced::theme::Theme;
 use iced::time;
 use iced::widget::{
@@ -14,15 +15,21 @@ use iced::widget::{
     text_editor, text_input,
 };
 use iced::window;
-use iced::{Background, Border, Color, Element, Length, Shadow, Subscription, Task, Vector};
+use iced::{Background, Border, Color, Element, Length, Point, Shadow, Subscription, Task, Vector};
 
-use crate::models::{Identity, Key as SshKey, KnownHostEntry, ManageMenu, Profile, ProfileType};
+use crate::models::{
+    Connection, ConnectionType, Group, Identity, Key as SshKey, KnownHostEntry, ManageMenu,
+    PortForward, PortForwardType, SftpEntry,
+};
 use crate::persistence::{
     AppPaths, AppSettings, Database, ShortcutSettings, TerminalAnsiGroup, TerminalColors,
-    load_settings, read_known_hosts, save_settings,
+    TerminalThemeEntry, builtin_terminal_theme_by_id, builtin_terminal_themes,
+    load_custom_terminal_themes, load_settings, read_known_hosts, save_settings,
 };
 use crate::session::{
-    ConnectionTarget, SessionCommand, SessionEvent, SessionHandle, connect_target,
+    ConnectionTarget, PortForwardHandle, SessionCommand, SessionEvent, SessionHandle, SftpHandle,
+    connect_sftp_target, connect_target, sftp_list_dir, sftp_read_file_preview,
+    start_port_forward,
 };
 use crate::terminal::{
     GlyphAtlas, TerminalAtlas, TerminalCanvasEvent, TerminalEvent, TerminalFont, TerminalPoint,

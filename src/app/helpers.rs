@@ -305,10 +305,10 @@ pub(crate) fn shell_display_name(shell_path: &str) -> String {
     }
 }
 
-pub(crate) fn local_terminal_tab_title(profile: &Profile) -> String {
+pub(crate) fn local_terminal_tab_title(connection: &Connection) -> String {
     let user = current_local_username();
     let host = local_machine_name();
-    let path = local_work_dir_label(&profile.work_dir);
+    let path = local_work_dir_label(&connection.work_dir);
 
     format!("{user}@{host}:{path}")
 }

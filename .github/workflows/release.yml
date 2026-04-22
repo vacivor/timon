@@ -82,9 +82,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - run: chmod +x ./scripts/ci/*.sh
       - run: ./scripts/ci/install-linux-deps.sh
       - run: cargo install cargo-deb cargo-generate-rpm --locked
-      - run: chmod +x ./scripts/ci/*.sh
       - env:
           TARGET_TRIPLE: ${{ matrix.target }}
           ARCHIVE_PREFIX: ${{ matrix.archive }}

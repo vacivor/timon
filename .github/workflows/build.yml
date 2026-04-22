@@ -116,14 +116,14 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Make CI scripts executable
+        run: chmod +x ./scripts/ci/*.sh
+
       - name: Install Linux build dependencies
         run: ./scripts/ci/install-linux-deps.sh
 
       - name: Install packaging cargo tools
         run: cargo install cargo-deb cargo-generate-rpm --locked
-
-      - name: Make CI scripts executable
-        run: chmod +x ./scripts/ci/*.sh
 
       - name: Build Linux packages
         env:

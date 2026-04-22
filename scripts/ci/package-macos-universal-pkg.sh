@@ -18,10 +18,9 @@ BUILD_ROOT="${DIST_DIR}/macos/universal"
 APP_DIR="${BUILD_ROOT}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
-PKG_ROOT="${BUILD_ROOT}/pkgroot"
 
 rm -rf "${BUILD_ROOT}"
-mkdir -p "${MACOS_DIR}" "${CONTENTS_DIR}/Resources" "${PKG_ROOT}/Applications"
+mkdir -p "${MACOS_DIR}" "${CONTENTS_DIR}/Resources"
 
 lipo -create \
   "target/${ARM_TRIPLE}/${PROFILE}/${BINARY_NAME}" \
@@ -59,12 +58,10 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 </plist>
 EOF
 
-cp -R "${APP_DIR}" "${PKG_ROOT}/Applications/${APP_NAME}.app"
-
 mkdir -p "${DIST_DIR}"
 pkgbuild \
-  --root "${PKG_ROOT}" \
+  --component "${APP_DIR}" \
   --identifier "${BUNDLE_ID}" \
   --version "${VERSION}" \
-  --install-location "/" \
+  --install-location "/Applications" \
   "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"

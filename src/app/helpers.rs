@@ -115,6 +115,7 @@ pub(crate) fn cell_in_selection(
 }
 
 pub(crate) fn main_window_settings() -> window::Settings {
+    #[allow(unused_mut)]
     let mut settings = window::Settings {
         size: iced::Size::new(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT),
         min_size: Some(iced::Size::new(

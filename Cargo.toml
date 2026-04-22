@@ -2,6 +2,8 @@
 name = "timon"
 version = "0.1.0"
 edition = "2024"
+description = "SSH and local terminal client rendered with iced"
+license = "Proprietary"
 
 [dependencies]
 alacritty_terminal = "0.26.0"
@@ -48,6 +50,7 @@ assets = [
 [package.metadata.generate-rpm]
 name = "timon"
 summary = "SSH and local terminal client rendered with iced"
+license = "Proprietary"
 assets = [
   { source = "target/release/timon", dest = "/usr/bin/timon", mode = "0755" },
   { source = "packaging/linux/io.vacivor.timon.desktop", dest = "/usr/share/applications/io.vacivor.timon.desktop", mode = "0644" },

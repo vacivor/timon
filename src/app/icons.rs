@@ -1,0 +1,70 @@
+use super::*;
+use iced::widget::svg;
+use std::sync::OnceLock;
+
+fn handle(bytes: &'static [u8], cache: &'static OnceLock<svg::Handle>) -> svg::Handle {
+    cache
+        .get_or_init(|| svg::Handle::from_memory(bytes))
+        .clone()
+}
+
+fn profiles_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/monitor.svg"), &HANDLE)
+}
+
+fn keychain_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/key-round.svg"), &HANDLE)
+}
+
+fn port_forwarding_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/route.svg"), &HANDLE)
+}
+
+fn snippets_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/file-text.svg"), &HANDLE)
+}
+
+fn known_hosts_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(
+        include_bytes!("../../assets/lucide/shield-check.svg"),
+        &HANDLE,
+    )
+}
+
+fn logs_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/logs.svg"), &HANDLE)
+}
+
+fn settings_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(
+        include_bytes!("../../assets/lucide/settings-2.svg"),
+        &HANDLE,
+    )
+}
+
+pub(crate) fn manage_menu_icon(
+    menu: ManageMenu,
+    color: Color,
+) -> iced::widget::svg::Svg<'static, Theme> {
+    let handle = match menu {
+        ManageMenu::Profiles => profiles_handle(),
+        ManageMenu::Keychain => keychain_handle(),
+        ManageMenu::PortForwarding => port_forwarding_handle(),
+        ManageMenu::Snippets => snippets_handle(),
+        ManageMenu::KnownHosts => known_hosts_handle(),
+        ManageMenu::Logs => logs_handle(),
+        ManageMenu::Settings => settings_handle(),
+    };
+
+    svg(handle)
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .style(move |_theme, _status| iced::widget::svg::Style { color: Some(color) })
+}

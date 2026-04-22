@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -13,7 +14,8 @@ use russh_sftp::client::SftpSession;
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::models::{Certificate, Identity, Profile, ProfileType};
+use crate::app::default_local_shell_path;
+use crate::models::{Identity, Key as SshKey, Profile, ProfileType};
 
 #[derive(Debug, Clone)]
 pub struct SessionHandle {
@@ -39,7 +41,7 @@ pub enum SessionEvent {
 #[derive(Debug, Clone)]
 pub struct ConnectionTarget {
     pub profile: Profile,
-    pub certificate: Option<Certificate>,
+    pub key: Option<SshKey>,
     pub identity: Option<Identity>,
     pub known_hosts_path: std::path::PathBuf,
     pub cols: u16,
@@ -106,18 +108,17 @@ fn connect_local_session(
         pixel_height: 0,
     })?;
 
-    // let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    // let command = CommandBuilder::new(shell);
+    let shell = resolved_local_shell_path(&target.profile);
+    let work_dir = resolved_local_work_dir(&target.profile);
+    let mut command = build_local_command(&target.profile, &shell, &work_dir)?;
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "timon");
+    command.env("SHELL", &shell);
 
-    // 获取当前用户名
-    let user = std::env::var("USER").unwrap_or_else(|_| "admin".into());
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-
-    // 使用 /usr/bin/login 启动
-    // -f: 跳过密码验证（因为你已经在用户会话中了）
-    // -p: 保留环境变量
-    let mut command = CommandBuilder::new("/usr/bin/login");
-    command.args(&["-fp", &user, &shell]);
+    if Path::new(&work_dir).is_dir() {
+        command.cwd(&work_dir);
+    }
 
     let mut child = pair.slave.spawn_command(command)?;
     let mut reader = pair.master.try_clone_reader()?;
@@ -193,6 +194,79 @@ fn connect_local_session(
     });
 
     Ok(SessionHandle { command_tx })
+}
+
+fn resolved_local_shell_path(profile: &Profile) -> String {
+    let configured = profile.shell_path.trim();
+    if configured.is_empty() {
+        default_local_shell_path()
+    } else {
+        configured.to_string()
+    }
+}
+
+fn resolved_local_work_dir(profile: &Profile) -> String {
+    profile.work_dir.trim().to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn build_local_command(profile: &Profile, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
+    let user = std::env::var("USER").unwrap_or_else(|_| "admin".into());
+    if profile.shell_path.trim().is_empty() && work_dir.trim().is_empty() {
+        let mut command = CommandBuilder::new("/usr/bin/login");
+        command.args(["-flp", &user]);
+        return Ok(command);
+    }
+
+    let mut command = CommandBuilder::new("/usr/bin/login");
+    let exec = macos_login_exec(shell, work_dir);
+    command.args(["-flp", &user, "/bin/zsh", "-fc", &exec]);
+    Ok(command)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn build_local_command(_profile: &Profile, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
+    let mut command = CommandBuilder::new(shell);
+    if work_dir.trim().is_empty() {
+        command.arg("-l");
+    } else {
+        command.cwd(work_dir);
+    }
+    Ok(command)
+}
+
+#[cfg(windows)]
+fn build_local_command(_profile: &Profile, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
+    let mut command = CommandBuilder::new(shell);
+    if !work_dir.trim().is_empty() {
+        command.cwd(work_dir);
+    }
+    Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn single_quote_for_sh(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\''"#))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_login_exec(shell: &str, work_dir: &str) -> String {
+    let shell_name = Path::new(shell)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("shell");
+    let mut command = String::new();
+    if Path::new(work_dir).is_dir() {
+        command.push_str("cd -- ");
+        command.push_str(&single_quote_for_sh(work_dir));
+        command.push_str(" && ");
+    }
+    command.push_str("exec -a -");
+    command.push_str(shell_name);
+    command.push(' ');
+    command.push_str(&single_quote_for_sh(shell));
+    command.push_str(" -l");
+    command
 }
 
 async fn connect_ssh_session(
@@ -383,31 +457,27 @@ fn effective_password(target: &ConnectionTarget) -> Option<String> {
 }
 
 fn effective_private_key(target: &ConnectionTarget) -> Result<Option<russh::keys::PrivateKey>> {
-    if let Some(certificate) = effective_certificate(target) {
-        if !certificate.private_key.trim().is_empty() {
-            return decode_secret_key(&certificate.private_key, None)
+    if let Some(key) = effective_key(target) {
+        if !key.private_key.trim().is_empty() {
+            return decode_secret_key(&key.private_key, None)
                 .map(Some)
-                .context("解析证书私钥失败");
+                .context("解析 key 私钥失败");
         }
     }
 
     Ok(None)
 }
 
-fn effective_certificate(target: &ConnectionTarget) -> Option<&Certificate> {
-    let profile_certificate = target.profile.certificate_id;
-    let identity_certificate = target
+fn effective_key(target: &ConnectionTarget) -> Option<&SshKey> {
+    let profile_key = target.profile.key_id;
+    let identity_key = target
         .identity
         .as_ref()
-        .and_then(|identity| identity.certificate_id);
+        .and_then(|identity| identity.key_id);
 
-    match (
-        profile_certificate,
-        identity_certificate,
-        target.certificate.as_ref(),
-    ) {
-        (Some(_), _, certificate) => certificate,
-        (None, Some(_), certificate) => certificate,
-        _ => target.certificate.as_ref(),
+    match (profile_key, identity_key, target.key.as_ref()) {
+        (Some(_), _, key) => key,
+        (None, Some(_), key) => key,
+        _ => target.key.as_ref(),
     }
 }

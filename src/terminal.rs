@@ -3,50 +3,62 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::term::cell::Flags as TermCellFlags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config, RenderableContent, Term, TermMode};
+use alacritty_terminal::term::{Config, RenderableContent, Term, TermMode, point_to_viewport};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb};
 use bytemuck::{Pod, Zeroable};
+use iced::advanced::graphics::text as graphics_text;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer as advanced_renderer;
 use iced::advanced::widget::tree;
 use iced::advanced::widget::{Tree, Widget};
-use iced::advanced::{Clipboard, Shell};
-use iced::advanced::{graphics::text as graphics_text, image};
+use iced::advanced::{Clipboard, Shell, input_method};
 use iced::font::{Style as FontStyle, Weight as FontWeight};
 use iced::keyboard::{Key, Modifiers, key};
 use iced::mouse;
+use iced::time::{Duration, Instant};
 use iced::wgpu;
-use iced::widget::canvas::{self, Action, Canvas, Geometry};
 use iced::widget::shader::{Pipeline as ShaderPipeline, Primitive as ShaderPrimitive, Viewport};
-use iced::{Color, Element, Event as IcedEvent, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::{Color, Element, Event as IcedEvent, Length, Point, Rectangle, Size};
 use iced_wgpu::primitive::Renderer as PrimitiveRenderer;
 use tokio::sync::mpsc;
 use wgpu::util::DeviceExt;
 
-use crate::persistence::{CursorSettings, FontSettings, TerminalColors};
+use crate::persistence::{FontSettings, TerminalColors, TerminalSettings};
 use crate::session::SessionCommand;
 
 pub struct TerminalView {
     term: Term<TerminalEventProxy>,
     parser: Processor,
     event_proxy: TerminalEventProxy,
+    event_rx: mpsc::UnboundedReceiver<TerminalEvent>,
     cols: usize,
     rows: usize,
 }
 
 #[derive(Debug, Clone)]
 struct TerminalEventProxy {
-    outbound: mpsc::UnboundedSender<SessionCommand>,
+    outbound: Arc<Mutex<Option<mpsc::UnboundedSender<SessionCommand>>>>,
+    events: mpsc::UnboundedSender<TerminalEvent>,
+}
+
+#[derive(Debug, Clone)]
+pub enum TerminalEvent {
+    Title(String),
+    ResetTitle,
 }
 
 #[derive(Debug, Clone)]
 pub struct TerminalTheme {
     pub background: Color,
     pub foreground: Color,
-    pub cursor: Color,
+    pub cursor_color: Color,
+    pub cursor_text: Color,
+    pub selection_background: Color,
+    pub selection_foreground: Color,
     pub ansi: [Color; 16],
 }
 
@@ -95,10 +107,15 @@ pub struct TerminalSnapshot {
     pub cells: Vec<TerminalCell>,
     pub cursor_line: usize,
     pub cursor_column: usize,
+    pub cursor_width: usize,
     pub cursor_shape: CursorShape,
     pub show_cursor: bool,
+    pub cursor_blinking: bool,
     pub background: Color,
     pub cursor_color: Color,
+    pub cursor_text: Color,
+    pub selection_background: Color,
+    pub selection_foreground: Color,
 }
 
 #[derive(Debug, Clone)]
@@ -117,33 +134,15 @@ pub struct TerminalPoint {
 pub enum TerminalCanvasEvent {
     SelectionStarted(TerminalPoint),
     SelectionUpdated(TerminalPoint),
-}
-
-pub struct TerminalCanvasState {
-    dragging: bool,
-    last_point: Option<TerminalPoint>,
-    text_cache_key: Mutex<Option<u64>>,
-    text_geometry_cache: canvas::Cache<Renderer>,
-    overlay_cache_key: Mutex<Option<u64>>,
-    overlay_geometry_cache: canvas::Cache<Renderer>,
-}
-
-impl Default for TerminalCanvasState {
-    fn default() -> Self {
-        Self {
-            dragging: false,
-            last_point: None,
-            text_cache_key: Mutex::new(None),
-            text_geometry_cache: canvas::Cache::new(),
-            overlay_cache_key: Mutex::new(None),
-            overlay_geometry_cache: canvas::Cache::new(),
-        }
-    }
+    Scrolled { lines: i32, point: TerminalPoint },
 }
 
 pub struct TerminalAtlasState {
     dragging: bool,
     last_point: Option<TerminalPoint>,
+    cursor_visible: bool,
+    cursor_blink_started_at: Instant,
+    last_cursor_key: Option<CursorBlinkKey>,
 }
 
 impl Default for TerminalAtlasState {
@@ -151,19 +150,25 @@ impl Default for TerminalAtlasState {
         Self {
             dragging: false,
             last_point: None,
+            cursor_visible: true,
+            cursor_blink_started_at: Instant::now(),
+            last_cursor_key: None,
         }
     }
 }
 
-pub struct TerminalCanvas<Message> {
-    snapshot: TerminalSnapshot,
-    selection: Option<TerminalSelection>,
-    font: TerminalFont,
-    atlas: Arc<Mutex<GlyphAtlas>>,
-    surface_cache: Arc<Mutex<Option<(u64, image::Handle)>>>,
-    scale_factor: f32,
-    on_event: Arc<dyn Fn(TerminalCanvasEvent) -> Message + Send + Sync>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorBlinkKey {
+    line: usize,
+    column: usize,
+    width: usize,
+    shape: CursorShape,
+    show_cursor: bool,
+    blinking: bool,
+    focused: bool,
 }
+
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 
 pub struct TerminalAtlas<Message> {
     snapshot: TerminalSnapshot,
@@ -171,14 +176,8 @@ pub struct TerminalAtlas<Message> {
     font: TerminalFont,
     atlas: Arc<Mutex<GlyphAtlas>>,
     scale_factor: f32,
+    focused: bool,
     on_event: Arc<dyn Fn(TerminalCanvasEvent) -> Message + Send + Sync>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TerminalSurface {
-    pub width: u32,
-    pub height: u32,
-    pub pixels: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -188,6 +187,7 @@ pub struct GlyphKey {
     pub cell_columns: u8,
     pub font_size_bits: u32,
     pub line_height_bits: u32,
+    pub thicken_bits: u32,
     pub scale_factor_bits: u32,
     pub bold: bool,
     pub italic: bool,
@@ -295,30 +295,46 @@ struct TerminalAtlasPrimitive {
 }
 
 impl TerminalView {
-    pub fn new(cols: usize, rows: usize, cursor: &CursorSettings) -> Self {
-        let (outbound, _rx) = mpsc::unbounded_channel();
-        let event_proxy = TerminalEventProxy { outbound };
+    pub fn new(cols: usize, rows: usize, settings: &TerminalSettings) -> Self {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let event_proxy = TerminalEventProxy {
+            outbound: Arc::new(Mutex::new(None)),
+            events: event_tx,
+        };
 
         Self {
             term: Term::new(
-                config_from_cursor(cursor),
+                config_from_terminal(settings),
                 &TermSize::new(cols, rows),
                 event_proxy.clone(),
             ),
             parser: Processor::new(),
             event_proxy,
+            event_rx,
             cols,
             rows,
         }
     }
 
-    pub fn reset(&mut self, cursor: &CursorSettings) {
+    pub fn reset(&mut self, settings: &TerminalSettings) {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        self.event_proxy = TerminalEventProxy {
+            outbound: self.event_proxy.outbound.clone(),
+            events: event_tx,
+        };
         self.term = Term::new(
-            config_from_cursor(cursor),
+            config_from_terminal(settings),
             &TermSize::new(self.cols, self.rows),
             self.event_proxy.clone(),
         );
         self.parser = Processor::new();
+        self.event_rx = event_rx;
+    }
+
+    pub fn set_outbound(&mut self, outbound: mpsc::UnboundedSender<SessionCommand>) {
+        if let Ok(mut sender) = self.event_proxy.outbound.lock() {
+            *sender = Some(outbound);
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -328,6 +344,10 @@ impl TerminalView {
     pub fn push_local_line(&mut self, line: &str) {
         self.feed(line.as_bytes());
         self.feed(b"\r\n");
+    }
+
+    pub fn try_recv_event(&mut self) -> Option<TerminalEvent> {
+        self.event_rx.try_recv().ok()
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -418,20 +438,69 @@ impl TerminalView {
 
     pub fn snapshot(&self, theme: &TerminalTheme) -> TerminalSnapshot {
         let renderable = self.term.renderable_content();
-        snapshot_from_renderable(renderable, self.cols, self.rows, theme)
+        snapshot_from_renderable(
+            renderable,
+            self.cols,
+            self.rows,
+            theme,
+            self.term.cursor_style().blinking,
+        )
     }
-}
 
-impl<Message> Clone for TerminalCanvas<Message> {
-    fn clone(&self) -> Self {
-        Self {
-            snapshot: self.snapshot.clone(),
-            selection: self.selection.clone(),
-            font: self.font.clone(),
-            atlas: self.atlas.clone(),
-            surface_cache: self.surface_cache.clone(),
-            scale_factor: self.scale_factor,
-            on_event: self.on_event.clone(),
+    pub fn handle_scroll(&mut self, delta: i32, point: TerminalPoint) {
+        if delta == 0 {
+            return;
+        }
+
+        let renderable = self.term.renderable_content();
+        let mode = renderable.mode;
+
+        if mode.contains(TermMode::ALT_SCREEN) {
+            if mode.intersects(TermMode::MOUSE_MODE) {
+                self.send_mouse_wheel(delta, point, mode.contains(TermMode::SGR_MOUSE));
+            } else if mode.contains(TermMode::ALTERNATE_SCROLL) {
+                self.send_alternate_scroll(delta, mode.contains(TermMode::APP_CURSOR));
+            }
+        } else if mode.intersects(TermMode::MOUSE_MODE) {
+            self.send_mouse_wheel(delta, point, mode.contains(TermMode::SGR_MOUSE));
+        } else {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
+    }
+
+    fn send_alternate_scroll(&self, delta: i32, app_cursor: bool) {
+        let sequence = if delta > 0 {
+            cursor_key(app_cursor, b'A', false, false)
+        } else {
+            cursor_key(app_cursor, b'B', false, false)
+        };
+
+        for _ in 0..delta.abs() {
+            self.event_proxy
+                .send_input(SessionCommand::Input(sequence.clone()));
+        }
+    }
+
+    fn send_mouse_wheel(&self, delta: i32, point: TerminalPoint, sgr: bool) {
+        let column = point.column.saturating_add(1) as u16;
+        let line = point.line.saturating_add(1) as u16;
+
+        for _ in 0..delta.abs() {
+            let button = if delta > 0 { 64 } else { 65 };
+            let payload = if sgr {
+                format!("\x1b[<{};{};{}M", button, column, line).into_bytes()
+            } else {
+                vec![
+                    0x1b,
+                    b'[',
+                    b'M',
+                    (32 + button) as u8,
+                    (32 + column.min(223)) as u8,
+                    (32 + line.min(223)) as u8,
+                ]
+            };
+
+            self.event_proxy.send_input(SessionCommand::Input(payload));
         }
     }
 }
@@ -444,48 +513,9 @@ impl<Message> Clone for TerminalAtlas<Message> {
             font: self.font.clone(),
             atlas: self.atlas.clone(),
             scale_factor: self.scale_factor,
+            focused: self.focused,
             on_event: self.on_event.clone(),
         }
-    }
-}
-
-impl<Message: 'static> TerminalCanvas<Message> {
-    pub fn new(
-        snapshot: TerminalSnapshot,
-        selection: Option<TerminalSelection>,
-        font: TerminalFont,
-        atlas: Arc<Mutex<GlyphAtlas>>,
-        surface_cache: Arc<Mutex<Option<(u64, image::Handle)>>>,
-        scale_factor: f32,
-        on_event: Arc<dyn Fn(TerminalCanvasEvent) -> Message + Send + Sync>,
-    ) -> Self {
-        Self {
-            snapshot,
-            selection,
-            font,
-            atlas,
-            surface_cache,
-            scale_factor: scale_factor.max(1.0),
-            on_event,
-        }
-    }
-
-    pub fn element(self) -> Element<'static, Message> {
-        Canvas::new(self)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
-    }
-
-    fn point_at(&self, bounds: Rectangle, point: Point) -> Option<TerminalPoint> {
-        if point.x < 0.0 || point.y < 0.0 || point.x > bounds.width || point.y > bounds.height {
-            return None;
-        }
-
-        let column = (point.x / self.font.metrics.cell_width).floor().max(0.0) as usize;
-        let line = (point.y / self.font.metrics.cell_height).floor().max(0.0) as usize;
-
-        Some(TerminalPoint { line, column })
     }
 }
 
@@ -496,6 +526,7 @@ impl<Message: 'static> TerminalAtlas<Message> {
         font: TerminalFont,
         atlas: Arc<Mutex<GlyphAtlas>>,
         scale_factor: f32,
+        focused: bool,
         on_event: Arc<dyn Fn(TerminalCanvasEvent) -> Message + Send + Sync>,
     ) -> Self {
         Self {
@@ -504,6 +535,7 @@ impl<Message: 'static> TerminalAtlas<Message> {
             font,
             atlas,
             scale_factor: scale_factor.max(1.0),
+            focused,
             on_event,
         }
     }
@@ -521,6 +553,15 @@ impl<Message: 'static> TerminalAtlas<Message> {
         let line = (point.y / self.font.metrics.cell_height).floor().max(0.0) as usize;
 
         Some(TerminalPoint { line, column })
+    }
+
+    fn point_at_clamped(&self, bounds: Rectangle, point: Point) -> TerminalPoint {
+        let max_x = (bounds.width - 0.01).max(0.0);
+        let max_y = (bounds.height - 0.01).max(0.0);
+        let clamped = Point::new(point.x.clamp(0.0, max_x), point.y.clamp(0.0, max_y));
+
+        self.point_at(bounds, clamped)
+            .unwrap_or(TerminalPoint { line: 0, column: 0 })
     }
 }
 
@@ -566,6 +607,54 @@ where
         let state = tree.state.downcast_mut::<TerminalAtlasState>();
 
         match event {
+            IcedEvent::Window(iced::window::Event::RedrawRequested(_)) if self.focused => {
+                let now =
+                    if let IcedEvent::Window(iced::window::Event::RedrawRequested(now)) = event {
+                        *now
+                    } else {
+                        Instant::now()
+                    };
+                let cursor_key = CursorBlinkKey {
+                    line: self.snapshot.cursor_line,
+                    column: self.snapshot.cursor_column,
+                    width: self.snapshot.cursor_width,
+                    shape: self.snapshot.cursor_shape,
+                    show_cursor: self.snapshot.show_cursor,
+                    blinking: self.snapshot.cursor_blinking,
+                    focused: self.focused,
+                };
+                if state.last_cursor_key != Some(cursor_key) {
+                    state.last_cursor_key = Some(cursor_key);
+                    state.cursor_visible = true;
+                    state.cursor_blink_started_at = now;
+                }
+                if self.snapshot.show_cursor && self.snapshot.cursor_blinking {
+                    let elapsed = now.saturating_duration_since(state.cursor_blink_started_at);
+                    let phase = (elapsed.as_millis() / CURSOR_BLINK_INTERVAL.as_millis()) % 2;
+                    state.cursor_visible = phase == 0;
+                    let millis_until_redraw = CURSOR_BLINK_INTERVAL.as_millis()
+                        - elapsed.as_millis() % CURSOR_BLINK_INTERVAL.as_millis();
+                    shell
+                        .request_redraw_at(now + Duration::from_millis(millis_until_redraw as u64));
+                } else {
+                    state.cursor_visible = true;
+                }
+
+                let cursor = Rectangle {
+                    x: bounds.x + self.snapshot.cursor_column as f32 * self.font.metrics.cell_width,
+                    y: bounds.y + self.snapshot.cursor_line as f32 * self.font.metrics.cell_height,
+                    width: (self.snapshot.cursor_width.max(1) as f32
+                        * self.font.metrics.cell_width)
+                        .max(1.0),
+                    height: self.font.metrics.cell_height.max(1.0),
+                };
+
+                shell.request_input_method(&input_method::InputMethod::Enabled {
+                    cursor,
+                    purpose: input_method::Purpose::Terminal,
+                    preedit: None::<input_method::Preedit<String>>,
+                });
+            }
             IcedEvent::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(point) = cursor.position_in(bounds) else {
                     return;
@@ -576,18 +665,18 @@ where
 
                 state.dragging = true;
                 state.last_point = Some(terminal_point);
+                state.cursor_visible = true;
+                state.cursor_blink_started_at = Instant::now();
                 shell.publish((self.on_event)(TerminalCanvasEvent::SelectionStarted(
                     terminal_point,
                 )));
                 shell.capture_event();
             }
             IcedEvent::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
-                let Some(point) = cursor.position_in(bounds) else {
+                let Some(point) = cursor.position_from(Point::new(bounds.x, bounds.y)) else {
                     return;
                 };
-                let Some(terminal_point) = self.point_at(bounds, point) else {
-                    return;
-                };
+                let terminal_point = self.point_at_clamped(bounds, point);
 
                 if state.last_point == Some(terminal_point) {
                     shell.capture_event();
@@ -607,13 +696,41 @@ where
                 state.last_point = None;
                 shell.capture_event();
             }
+            IcedEvent::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                let Some(_point) = cursor.position_in(bounds) else {
+                    return;
+                };
+
+                let lines = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => (*y).round() as i32,
+                    mouse::ScrollDelta::Pixels { y, .. } => {
+                        let lines = *y / self.font.metrics.cell_height.max(1.0);
+                        if lines.abs() < 1.0 {
+                            lines.signum() as i32
+                        } else {
+                            lines.round() as i32
+                        }
+                    }
+                };
+
+                if lines != 0 {
+                    let Some(point) = self.point_at(bounds, _point) else {
+                        return;
+                    };
+                    shell.publish((self.on_event)(TerminalCanvasEvent::Scrolled {
+                        lines,
+                        point,
+                    }));
+                    shell.capture_event();
+                }
+            }
             _ => {}
         }
     }
 
     fn draw(
         &self,
-        _tree: &Tree,
+        tree: &Tree,
         renderer: &mut RendererType,
         _theme: &Theme,
         _style: &advanced_renderer::Style,
@@ -621,10 +738,15 @@ where
         _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
+        let state = tree.state.downcast_ref::<TerminalAtlasState>();
+        let mut snapshot = self.snapshot.clone();
+        if snapshot.cursor_blinking && !state.cursor_visible {
+            snapshot.show_cursor = false;
+        }
         renderer.draw_primitive(
             layout.bounds(),
             TerminalAtlasPrimitive {
-                snapshot: self.snapshot.clone(),
+                snapshot,
                 selection: self.selection.clone(),
                 font: self.font.clone(),
                 atlas: self.atlas.clone(),
@@ -1011,6 +1133,8 @@ impl TerminalAtlasPipeline {
         });
 
         for cell in &primitive.snapshot.cells {
+            let selected = selection_contains(primitive.selection.as_ref(), cell);
+            let cursor_on_cell = cursor_covers_cell(&primitive.snapshot, cell);
             let rect = physical_cell_rect(
                 cell.column,
                 cell.line,
@@ -1020,14 +1144,25 @@ impl TerminalAtlasPipeline {
                 primitive.scale_factor,
             );
 
-            if cell.bg != primitive.snapshot.background {
+            let background = if cursor_on_cell
+                && primitive.snapshot.show_cursor
+                && matches!(primitive.snapshot.cursor_shape, CursorShape::Block)
+            {
+                primitive.snapshot.cursor_color
+            } else if selected {
+                primitive.snapshot.selection_background
+            } else {
+                cell.bg
+            };
+
+            if background != primitive.snapshot.background {
                 push_rect_instance(
                     &mut rects,
                     rect.0 as f32,
                     rect.1 as f32,
                     (rect.2 - rect.0) as f32,
                     (rect.3 - rect.1) as f32,
-                    cell.bg,
+                    background,
                 );
             }
 
@@ -1068,7 +1203,16 @@ impl TerminalAtlasPipeline {
                 atlas_y: glyph.atlas_y,
                 atlas_width: page.width,
                 atlas_height: page.height,
-                color: cell.fg,
+                color: if cursor_on_cell
+                    && primitive.snapshot.show_cursor
+                    && matches!(primitive.snapshot.cursor_shape, CursorShape::Block)
+                {
+                    primitive.snapshot.cursor_text
+                } else if selected {
+                    primitive.snapshot.selection_foreground
+                } else {
+                    cell.fg
+                },
             });
         }
 
@@ -1103,29 +1247,17 @@ impl TerminalAtlasPipeline {
 
     fn rebuild_overlay_layer(&mut self, primitive: &TerminalAtlasPrimitive, device: &wgpu::Device) {
         let mut rects = Vec::new();
-        let cell_width = primitive.font.metrics.cell_width * primitive.scale_factor;
-        let cell_height = primitive.font.metrics.cell_height * primitive.scale_factor;
 
-        for cell in &primitive.snapshot.cells {
-            if selection_contains(primitive.selection.as_ref(), cell) {
-                push_rect_instance(
-                    &mut rects,
-                    cell.column as f32 * cell_width,
-                    cell.line as f32 * cell_height,
-                    cell.width.max(1) as f32 * cell_width,
-                    cell_height,
-                    Color::from_rgba8(56, 126, 245, 0.22),
-                );
-            }
-        }
-
-        if primitive.snapshot.show_cursor {
-            let rect = physical_cell_rect(
+        if primitive.snapshot.show_cursor
+            && !matches!(primitive.snapshot.cursor_shape, CursorShape::Block)
+        {
+            let rect = cursor_visual_rect(
                 primitive.snapshot.cursor_column,
                 primitive.snapshot.cursor_line,
-                1,
+                primitive.snapshot.cursor_width.max(1),
                 primitive.font.metrics.cell_width,
                 primitive.font.metrics.cell_height,
+                primitive.font.size,
                 primitive.scale_factor,
             );
             append_cursor_rects(
@@ -1174,6 +1306,7 @@ impl ShaderPrimitive for TerminalAtlasPrimitive {
             &self.snapshot,
             &self.font,
             self.scale_factor,
+            self.selection.as_ref(),
             bounds.size(),
         );
         if pipeline.text_cache_key != Some(text_key) {
@@ -1227,221 +1360,23 @@ impl ShaderPrimitive for TerminalAtlasPrimitive {
     }
 }
 
-impl<Message: 'static> canvas::Program<Message> for TerminalCanvas<Message> {
-    type State = TerminalCanvasState;
-
-    fn update(
-        &self,
-        state: &mut Self::State,
-        event: &canvas::Event,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> Option<Action<Message>> {
-        match event {
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let point = cursor.position_in(bounds)?;
-                let terminal_point = self.point_at(bounds, point)?;
-                state.dragging = true;
-                state.last_point = Some(terminal_point);
-                Some(
-                    Action::publish((self.on_event)(TerminalCanvasEvent::SelectionStarted(
-                        terminal_point,
-                    )))
-                    .and_capture(),
-                )
-            }
-            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
-                let point = cursor.position_in(bounds)?;
-                let terminal_point = self.point_at(bounds, point)?;
-
-                if state.last_point == Some(terminal_point) {
-                    return Some(Action::capture());
-                }
-
-                state.last_point = Some(terminal_point);
-
-                Some(
-                    Action::publish((self.on_event)(TerminalCanvasEvent::SelectionUpdated(
-                        terminal_point,
-                    )))
-                    .and_capture(),
-                )
-            }
-            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if state.dragging =>
-            {
-                state.dragging = false;
-                state.last_point = None;
-                Some(Action::capture())
-            }
-            _ => None,
-        }
-    }
-
-    fn draw(
-        &self,
-        state: &Self::State,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<Geometry<Renderer>> {
-        let cache_key = terminal_surface_cache_key(
-            &self.snapshot,
-            &self.font,
-            self.scale_factor,
-            bounds.size(),
-        );
-
-        if let Ok(mut previous_key) = state.text_cache_key.lock() {
-            if previous_key.as_ref() != Some(&cache_key) {
-                state.text_geometry_cache.clear();
-                *previous_key = Some(cache_key);
-            }
-        }
-
-        let cached_surface = self.surface_cache.lock().ok().and_then(|cache| {
-            cache
-                .as_ref()
-                .and_then(|(key, handle)| (*key == cache_key).then(|| handle.clone()))
-        });
-
-        let surface = cached_surface.or_else(|| {
-            let surface = compose_terminal_surface(
-                &self.snapshot,
-                &self.font,
-                &self.atlas,
-                self.scale_factor,
-                bounds.size(),
-            )?;
-
-            if let Ok(mut cache) = self.surface_cache.lock() {
-                *cache = Some((cache_key, surface.clone()));
-            }
-
-            Some(surface)
-        });
-
-        let cell_width = self.font.metrics.cell_width;
-        let cell_height = self.font.metrics.cell_height;
-
-        let text_geometry = state
-            .text_geometry_cache
-            .draw(renderer, bounds.size(), |frame| {
-                frame.fill_rectangle(Point::ORIGIN, bounds.size(), self.snapshot.background);
-
-                if let Some(surface) = &surface {
-                    frame.draw_image(
-                        Rectangle {
-                            x: 0.0,
-                            y: 0.0,
-                            width: bounds.width,
-                            height: bounds.height,
-                        },
-                        image::Image::new(surface.clone())
-                            .snap(true)
-                            .filter_method(image::FilterMethod::Nearest),
-                    );
-                }
-            });
-
-        let overlay_key =
-            terminal_overlay_cache_key(&self.snapshot, self.selection.as_ref(), bounds.size());
-
-        if let Ok(mut previous_key) = state.overlay_cache_key.lock() {
-            if previous_key.as_ref() != Some(&overlay_key) {
-                state.overlay_geometry_cache.clear();
-                *previous_key = Some(overlay_key);
-            }
-        }
-
-        let overlay_geometry =
-            state
-                .overlay_geometry_cache
-                .draw(renderer, bounds.size(), |frame| {
-                    for cell in &self.snapshot.cells {
-                        if selection_contains(self.selection.as_ref(), cell) {
-                            frame.fill_rectangle(
-                                Point::new(
-                                    cell.column as f32 * cell_width,
-                                    cell.line as f32 * cell_height,
-                                ),
-                                Size::new((cell.width.max(1) as f32) * cell_width, cell_height),
-                                Color::from_rgba8(56, 126, 245, 0.22),
-                            );
-                        }
-                    }
-
-                    if self.snapshot.show_cursor {
-                        let x = self.snapshot.cursor_column as f32 * cell_width;
-                        let y = self.snapshot.cursor_line as f32 * cell_height;
-
-                        match self.snapshot.cursor_shape {
-                            CursorShape::Block => {
-                                frame.fill_rectangle(
-                                    Point::new(x, y),
-                                    Size::new(cell_width, cell_height),
-                                    self.snapshot.cursor_color,
-                                );
-                            }
-                            CursorShape::HollowBlock => {
-                                frame.stroke_rectangle(
-                                    Point::new(x, y),
-                                    Size::new(cell_width, cell_height),
-                                    canvas::Stroke::default()
-                                        .with_color(self.snapshot.cursor_color)
-                                        .with_width(1.0),
-                                );
-                            }
-                            CursorShape::Underline => {
-                                frame.fill_rectangle(
-                                    Point::new(x, y + cell_height - 2.0),
-                                    Size::new(cell_width, 2.0),
-                                    self.snapshot.cursor_color,
-                                );
-                            }
-                            CursorShape::Beam => {
-                                frame.fill_rectangle(
-                                    Point::new(x, y),
-                                    Size::new(2.0, cell_height),
-                                    self.snapshot.cursor_color,
-                                );
-                            }
-                            CursorShape::Hidden => {}
-                        }
-                    }
-                });
-
-        vec![text_geometry, overlay_geometry]
-    }
-
-    fn mouse_interaction(
-        &self,
-        _state: &Self::State,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> mouse::Interaction {
-        if cursor.is_over(bounds) {
-            mouse::Interaction::Text
-        } else {
-            mouse::Interaction::default()
-        }
-    }
-}
-
 impl TerminalTheme {
     pub fn from_settings(colors: &TerminalColors) -> Self {
         let fallback = TerminalColors::atom_one_light();
+        let normal = colors.normal.as_array();
+        let bright = colors.bright.as_array();
+        let fallback_normal = fallback.normal.as_array();
+        let fallback_bright = fallback.bright.as_array();
 
         let mut ansi = [Color::BLACK; 16];
         for (index, slot) in ansi.iter_mut().enumerate() {
-            let value = colors
-                .ansi_colors
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| fallback.ansi_colors[index].clone());
-            *slot = parse_hex_color(&value)
-                .unwrap_or_else(|| parse_hex_color(&fallback.ansi_colors[index]).unwrap());
+            let (value, fallback_value) = if index < 8 {
+                (&normal[index], &fallback_normal[index])
+            } else {
+                (&bright[index - 8], &fallback_bright[index - 8])
+            };
+            *slot =
+                parse_hex_color(value).unwrap_or_else(|| parse_hex_color(fallback_value).unwrap());
         }
 
         Self {
@@ -1449,8 +1384,14 @@ impl TerminalTheme {
                 .unwrap_or_else(|| parse_hex_color(&fallback.background).unwrap()),
             foreground: parse_hex_color(&colors.foreground)
                 .unwrap_or_else(|| parse_hex_color(&fallback.foreground).unwrap()),
-            cursor: parse_hex_color(&colors.cursor)
-                .unwrap_or_else(|| parse_hex_color(&fallback.cursor).unwrap()),
+            cursor_color: parse_hex_color(&colors.cursor_color)
+                .unwrap_or_else(|| parse_hex_color(&fallback.cursor_color).unwrap()),
+            cursor_text: parse_hex_color(&colors.cursor_text)
+                .unwrap_or_else(|| parse_hex_color(&fallback.cursor_text).unwrap()),
+            selection_background: parse_hex_color(&colors.selection_background)
+                .unwrap_or_else(|| parse_hex_color(&fallback.selection_background).unwrap()),
+            selection_foreground: parse_hex_color(&colors.selection_foreground)
+                .unwrap_or_else(|| parse_hex_color(&fallback.selection_foreground).unwrap()),
             ansi,
         }
     }
@@ -1471,6 +1412,10 @@ impl TerminalFont {
             metrics: measure_terminal_metrics(font_face, size, line_height),
             family_name,
         }
+    }
+
+    pub fn iced_font(&self) -> iced::Font {
+        resolve_terminal_font(&self.family_name)
     }
 }
 
@@ -1574,10 +1519,27 @@ impl MaskAtlasPage {
 
 impl EventListener for TerminalEventProxy {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(payload) = event {
-            let _ = self
-                .outbound
-                .send(SessionCommand::Input(payload.into_bytes()));
+        match event {
+            Event::PtyWrite(payload) => {
+                self.send_input(SessionCommand::Input(payload.into_bytes()));
+            }
+            Event::Title(title) => {
+                let _ = self.events.send(TerminalEvent::Title(title));
+            }
+            Event::ResetTitle => {
+                let _ = self.events.send(TerminalEvent::ResetTitle);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl TerminalEventProxy {
+    fn send_input(&self, command: SessionCommand) {
+        if let Ok(sender) = self.outbound.lock() {
+            if let Some(outbound) = &*sender {
+                let _ = outbound.send(command);
+            }
         }
     }
 }
@@ -1587,12 +1549,17 @@ fn snapshot_from_renderable(
     cols: usize,
     rows: usize,
     theme: &TerminalTheme,
+    cursor_blinking: bool,
 ) -> TerminalSnapshot {
     let mut cells = Vec::with_capacity(cols * rows);
 
     for indexed in renderable.display_iter {
-        let line = indexed.point.line.0.max(0) as usize;
-        let column = indexed.point.column.0;
+        let Some(viewport_point) = point_to_viewport(renderable.display_offset, indexed.point)
+        else {
+            continue;
+        };
+        let line = viewport_point.line;
+        let column = viewport_point.column.0;
 
         if line >= rows || column >= cols {
             continue;
@@ -1645,15 +1612,29 @@ fn snapshot_from_renderable(
 
     let cursor_line = renderable.cursor.point.line.0.max(0) as usize;
     let cursor_column = renderable.cursor.point.column.0;
+    let cursor_width = cells
+        .iter()
+        .find(|cell| {
+            cell.line == cursor_line
+                && cell.column <= cursor_column
+                && cursor_column < cell.column + cell.width.max(1)
+        })
+        .map(|cell| cell.width.max(1))
+        .unwrap_or(1);
 
     TerminalSnapshot {
         cells,
         cursor_line: cursor_line.min(rows.saturating_sub(1)),
         cursor_column: cursor_column.min(cols.saturating_sub(1)),
+        cursor_width,
         cursor_shape: renderable.cursor.shape,
         show_cursor: renderable.cursor.shape != CursorShape::Hidden,
+        cursor_blinking,
         background: theme.background,
-        cursor_color: theme.cursor,
+        cursor_color: theme.cursor_color,
+        cursor_text: theme.cursor_text,
+        selection_background: theme.selection_background,
+        selection_foreground: theme.selection_foreground,
     }
 }
 
@@ -1673,7 +1654,7 @@ fn fallback_named_color(named: NamedColor, theme: &TerminalTheme) -> Rgb {
     match named {
         NamedColor::Background => to_rgb(theme.background),
         NamedColor::Foreground | NamedColor::BrightForeground => to_rgb(theme.foreground),
-        NamedColor::Cursor => to_rgb(theme.cursor),
+        NamedColor::Cursor => to_rgb(theme.cursor_color),
         NamedColor::Black => to_rgb(theme.ansi[0]),
         NamedColor::Red => to_rgb(theme.ansi[1]),
         NamedColor::Green => to_rgb(theme.ansi[2]),
@@ -1845,6 +1826,7 @@ fn glyph_key_for_cell(
         cell_columns: cell.width.min(u8::MAX as usize) as u8,
         font_size_bits: font.size.to_bits(),
         line_height_bits: font.line_height.to_bits(),
+        thicken_bits: font.thicken.to_bits(),
         scale_factor_bits: scale_factor.to_bits(),
         bold: cell.bold,
         italic: cell.italic,
@@ -1912,6 +1894,11 @@ fn rasterize_glyph(
                 return;
             }
 
+            let coverage = apply_font_thicken(coverage, f32::from_bits(key.thicken_bits));
+            if coverage == 0 {
+                return;
+            }
+
             let index = (y as u32 * width + x as u32) as usize;
             pixels[index] = pixels[index].max(coverage);
             has_ink = true;
@@ -1936,6 +1923,7 @@ fn terminal_surface_cache_key(
     snapshot: &TerminalSnapshot,
     font: &TerminalFont,
     scale_factor: f32,
+    selection: Option<&TerminalSelection>,
     size: Size,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1949,6 +1937,16 @@ fn terminal_surface_cache_key(
     font.family_name.hash(&mut hasher);
 
     snapshot.background.into_rgba8().hash(&mut hasher);
+    snapshot.cursor_line.hash(&mut hasher);
+    snapshot.cursor_column.hash(&mut hasher);
+    snapshot.cursor_width.hash(&mut hasher);
+    std::mem::discriminant(&snapshot.cursor_shape).hash(&mut hasher);
+    snapshot.show_cursor.hash(&mut hasher);
+    snapshot.cursor_blinking.hash(&mut hasher);
+    snapshot.cursor_color.into_rgba8().hash(&mut hasher);
+    snapshot.cursor_text.into_rgba8().hash(&mut hasher);
+    snapshot.selection_background.into_rgba8().hash(&mut hasher);
+    snapshot.selection_foreground.into_rgba8().hash(&mut hasher);
 
     snapshot.cells.len().hash(&mut hasher);
     for cell in &snapshot.cells {
@@ -1969,6 +1967,15 @@ fn terminal_surface_cache_key(
         }
     }
 
+    if let Some(selection) = selection {
+        selection.start.line.hash(&mut hasher);
+        selection.start.column.hash(&mut hasher);
+        selection.end.line.hash(&mut hasher);
+        selection.end.column.hash(&mut hasher);
+    } else {
+        0usize.hash(&mut hasher);
+    }
+
     hasher.finish()
 }
 
@@ -1983,8 +1990,10 @@ fn terminal_overlay_cache_key(
     size.height.to_bits().hash(&mut hasher);
     snapshot.cursor_line.hash(&mut hasher);
     snapshot.cursor_column.hash(&mut hasher);
+    snapshot.cursor_width.hash(&mut hasher);
     std::mem::discriminant(&snapshot.cursor_shape).hash(&mut hasher);
     snapshot.show_cursor.hash(&mut hasher);
+    snapshot.cursor_blinking.hash(&mut hasher);
     snapshot.cursor_color.into_rgba8().hash(&mut hasher);
 
     if let Some(selection) = selection {
@@ -1997,124 +2006,6 @@ fn terminal_overlay_cache_key(
     }
 
     hasher.finish()
-}
-
-fn compose_terminal_surface(
-    snapshot: &TerminalSnapshot,
-    font: &TerminalFont,
-    atlas: &Arc<Mutex<GlyphAtlas>>,
-    scale_factor: f32,
-    size: Size,
-) -> Option<image::Handle> {
-    let scale = scale_factor.max(1.0);
-    let surface_width = (size.width * scale).round().max(1.0) as u32;
-    let surface_height = (size.height * scale).round().max(1.0) as u32;
-    let mut pixels = vec![0u8; (surface_width * surface_height * 4) as usize];
-
-    fill_surface(
-        &mut pixels,
-        surface_width,
-        surface_height,
-        snapshot.background,
-    );
-
-    let cell_width = font.metrics.cell_width;
-    let cell_height = font.metrics.cell_height;
-    let mut glyphs_to_draw = Vec::new();
-
-    for cell in &snapshot.cells {
-        let rect = physical_cell_rect(
-            cell.column,
-            cell.line,
-            cell.width.max(1),
-            cell_width,
-            cell_height,
-            scale,
-        );
-
-        if cell.bg != snapshot.background {
-            fill_rect(&mut pixels, surface_width, surface_height, rect, cell.bg);
-        }
-
-        if let Some(glyph) = rasterized_glyph_for_cell(atlas, font, scale_factor, cell) {
-            glyphs_to_draw.push((cell.clone(), glyph));
-        }
-    }
-
-    let Ok(atlas) = atlas.lock() else {
-        return Some(image::Handle::from_rgba(
-            surface_width,
-            surface_height,
-            pixels,
-        ));
-    };
-
-    for (cell, glyph) in glyphs_to_draw {
-        let Some(page) = atlas.page(glyph.page_index) else {
-            continue;
-        };
-        let rect = physical_cell_rect(
-            cell.column,
-            cell.line,
-            cell.width.max(1),
-            cell_width,
-            cell_height,
-            scale,
-        );
-        let origin_x = rect.0 + glyph.offset_x;
-        let origin_y = rect.1 + glyph.offset_y;
-
-        blend_glyph_mask(
-            &mut pixels,
-            surface_width,
-            surface_height,
-            page,
-            &glyph,
-            origin_x,
-            origin_y,
-            cell.fg,
-            font.thicken,
-        );
-
-        if let Some(underline) = cell.underline {
-            draw_underline_pixels(
-                &mut pixels,
-                surface_width,
-                surface_height,
-                underline,
-                rect.0,
-                rect.1,
-                rect.2 - rect.0,
-                rect.3 - rect.1,
-                cell.underline_color,
-            );
-        }
-    }
-
-    if snapshot.show_cursor {
-        let rect = physical_cell_rect(
-            snapshot.cursor_column,
-            snapshot.cursor_line,
-            1,
-            cell_width,
-            cell_height,
-            scale,
-        );
-        draw_cursor_pixels(
-            &mut pixels,
-            surface_width,
-            surface_height,
-            snapshot.cursor_shape,
-            rect,
-            snapshot.cursor_color,
-        );
-    }
-
-    Some(image::Handle::from_rgba(
-        surface_width,
-        surface_height,
-        pixels,
-    ))
 }
 
 fn physical_cell_rect(
@@ -2132,78 +2023,41 @@ fn physical_cell_rect(
     (x0, y0, x1.max(x0 + 1), y1.max(y0 + 1))
 }
 
-fn fill_surface(pixels: &mut [u8], width: u32, height: u32, color: Color) {
-    let [r, g, b, a] = color.into_rgba8();
-    for y in 0..height {
-        for x in 0..width {
-            let index = ((y * width + x) * 4) as usize;
-            pixels[index] = r;
-            pixels[index + 1] = g;
-            pixels[index + 2] = b;
-            pixels[index + 3] = a;
-        }
-    }
+fn cursor_visual_rect(
+    column: usize,
+    line: usize,
+    cell_columns: usize,
+    cell_width: f32,
+    cell_height: f32,
+    font_size: f32,
+    scale: f32,
+) -> (i32, i32, i32, i32) {
+    let (x0, y0, x1, y1) =
+        physical_cell_rect(column, line, cell_columns, cell_width, cell_height, scale);
+    let full_height = (y1 - y0).max(1);
+    let target_height = (font_size * scale).round() as i32;
+    let visual_height = target_height.clamp(1, full_height);
+    let inset = ((full_height - visual_height) / 2).max(0);
+
+    (
+        x0,
+        y0 + inset,
+        x1,
+        (y0 + inset + visual_height).max(y0 + inset + 1),
+    )
 }
 
-fn fill_rect(
-    pixels: &mut [u8],
-    surface_width: u32,
-    surface_height: u32,
-    rect: (i32, i32, i32, i32),
-    color: Color,
-) {
-    let [r, g, b, a] = color.into_rgba8();
-    for_each_pixel(surface_width, surface_height, rect, |index| {
-        pixels[index] = r;
-        pixels[index + 1] = g;
-        pixels[index + 2] = b;
-        pixels[index + 3] = a;
-    });
-}
-
-fn blend_glyph_mask(
-    pixels: &mut [u8],
-    surface_width: u32,
-    surface_height: u32,
-    page: &MaskAtlasPage,
-    glyph: &RasterizedGlyph,
-    origin_x: i32,
-    origin_y: i32,
-    color: Color,
-    thicken: f32,
-) {
-    let [r, g, b, a] = color.into_rgba8();
-
-    for row in 0..glyph.height as i32 {
-        for column in 0..glyph.width as i32 {
-            let dst_x = origin_x + column;
-            let dst_y = origin_y + row;
-
-            if dst_x < 0
-                || dst_y < 0
-                || dst_x >= surface_width as i32
-                || dst_y >= surface_height as i32
-            {
-                continue;
-            }
-
-            let src_index = ((glyph.atlas_y as i32 + row) as u32 * page.width
-                + (glyph.atlas_x as i32 + column) as u32) as usize;
-            let coverage = page.pixels[src_index];
-            if coverage == 0 {
-                continue;
-            }
-
-            let coverage = apply_font_thicken(coverage, thicken);
-            if coverage == 0 {
-                continue;
-            }
-
-            let alpha = ((u16::from(a) * u16::from(coverage)) / 255) as u8;
-            let dst_index = (((dst_y as u32) * surface_width + (dst_x as u32)) * 4) as usize;
-            blend_over(&mut pixels[dst_index..dst_index + 4], r, g, b, alpha);
-        }
+fn cursor_covers_cell(snapshot: &TerminalSnapshot, cell: &TerminalCell) -> bool {
+    if cell.line != snapshot.cursor_line {
+        return false;
     }
+
+    let cursor_start = snapshot.cursor_column;
+    let cursor_end = snapshot.cursor_column + snapshot.cursor_width.max(1) - 1;
+    let cell_start = cell.column;
+    let cell_end = cell.column + cell.width.max(1) - 1;
+
+    cell_end >= cursor_start && cell_start <= cursor_end
 }
 
 fn apply_font_thicken(coverage: u8, thicken: f32) -> u8 {
@@ -2320,194 +2174,6 @@ fn append_cursor_rects(
         CursorShape::Beam => push_rect_instance(rects, x, y, 2.0, height, color),
         CursorShape::Hidden => {}
     }
-}
-
-fn draw_underline_pixels(
-    pixels: &mut [u8],
-    surface_width: u32,
-    surface_height: u32,
-    underline: UnderlineStyle,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    color: Color,
-) {
-    let baseline = y + height - 2;
-    match underline {
-        UnderlineStyle::Single => fill_rect(
-            pixels,
-            surface_width,
-            surface_height,
-            (x, baseline, x + width, baseline + 1),
-            color,
-        ),
-        UnderlineStyle::Double => {
-            fill_rect(
-                pixels,
-                surface_width,
-                surface_height,
-                (x, baseline - 2, x + width, baseline - 1),
-                color,
-            );
-            fill_rect(
-                pixels,
-                surface_width,
-                surface_height,
-                (x, baseline, x + width, baseline + 1),
-                color,
-            );
-        }
-        UnderlineStyle::Dotted => draw_pattern_line(
-            pixels,
-            surface_width,
-            surface_height,
-            x,
-            baseline,
-            width,
-            color,
-            1,
-            3,
-        ),
-        UnderlineStyle::Dashed => draw_pattern_line(
-            pixels,
-            surface_width,
-            surface_height,
-            x,
-            baseline,
-            width,
-            color,
-            4,
-            6,
-        ),
-        UnderlineStyle::Curly => {
-            let mut offset = 0;
-            let mut up = false;
-            while offset < width {
-                let wave_y = if up { baseline - 1 } else { baseline };
-                fill_rect(
-                    pixels,
-                    surface_width,
-                    surface_height,
-                    (x + offset, wave_y, x + (offset + 2).min(width), wave_y + 1),
-                    color,
-                );
-                offset += 2;
-                up = !up;
-            }
-        }
-    }
-}
-
-fn draw_pattern_line(
-    pixels: &mut [u8],
-    surface_width: u32,
-    surface_height: u32,
-    x: i32,
-    y: i32,
-    width: i32,
-    color: Color,
-    on: i32,
-    stride: i32,
-) {
-    let mut offset = 0;
-    while offset < width {
-        fill_rect(
-            pixels,
-            surface_width,
-            surface_height,
-            (x + offset, y, x + (offset + on).min(width), y + 1),
-            color,
-        );
-        offset += stride;
-    }
-}
-
-fn draw_cursor_pixels(
-    pixels: &mut [u8],
-    surface_width: u32,
-    surface_height: u32,
-    cursor_shape: CursorShape,
-    rect: (i32, i32, i32, i32),
-    color: Color,
-) {
-    match cursor_shape {
-        CursorShape::Block => fill_rect(pixels, surface_width, surface_height, rect, color),
-        CursorShape::HollowBlock => {
-            fill_rect(
-                pixels,
-                surface_width,
-                surface_height,
-                (rect.0, rect.1, rect.2, rect.1 + 1),
-                color,
-            );
-            fill_rect(
-                pixels,
-                surface_width,
-                surface_height,
-                (rect.0, rect.3 - 1, rect.2, rect.3),
-                color,
-            );
-            fill_rect(
-                pixels,
-                surface_width,
-                surface_height,
-                (rect.0, rect.1, rect.0 + 1, rect.3),
-                color,
-            );
-            fill_rect(
-                pixels,
-                surface_width,
-                surface_height,
-                (rect.2 - 1, rect.1, rect.2, rect.3),
-                color,
-            );
-        }
-        CursorShape::Underline => fill_rect(
-            pixels,
-            surface_width,
-            surface_height,
-            (rect.0, rect.3 - 2, rect.2, rect.3),
-            color,
-        ),
-        CursorShape::Beam => fill_rect(
-            pixels,
-            surface_width,
-            surface_height,
-            (rect.0, rect.1, rect.0 + 2, rect.3),
-            color,
-        ),
-        CursorShape::Hidden => {}
-    }
-}
-
-fn for_each_pixel(
-    surface_width: u32,
-    surface_height: u32,
-    rect: (i32, i32, i32, i32),
-    mut f: impl FnMut(usize),
-) {
-    let x0 = rect.0.clamp(0, surface_width as i32);
-    let y0 = rect.1.clamp(0, surface_height as i32);
-    let x1 = rect.2.clamp(0, surface_width as i32);
-    let y1 = rect.3.clamp(0, surface_height as i32);
-
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let index = (((y as u32) * surface_width + (x as u32)) * 4) as usize;
-            f(index);
-        }
-    }
-}
-
-fn blend_over(dst: &mut [u8], r: u8, g: u8, b: u8, a: u8) {
-    let alpha = f32::from(a) / 255.0;
-    let inv_alpha = 1.0 - alpha;
-
-    dst[0] = (f32::from(r) * alpha + f32::from(dst[0]) * inv_alpha).round() as u8;
-    dst[1] = (f32::from(g) * alpha + f32::from(dst[1]) * inv_alpha).round() as u8;
-    dst[2] = (f32::from(b) * alpha + f32::from(dst[2]) * inv_alpha).round() as u8;
-    dst[3] = 255;
 }
 
 const STABLE_CJK_FALLBACKS: &[&str] = &[
@@ -2748,16 +2414,17 @@ fn measure_terminal_metrics(
     }
 }
 
-fn config_from_cursor(cursor: &CursorSettings) -> Config {
+fn config_from_terminal(settings: &TerminalSettings) -> Config {
     let mut config = Config::default();
     config.default_cursor_style = alacritty_terminal::vte::ansi::CursorStyle {
-        shape: match cursor.shape.as_str() {
+        shape: match settings.cursor.shape.as_str() {
             "beam" => CursorShape::Beam,
             "underline" => CursorShape::Underline,
             _ => CursorShape::Block,
         },
-        blinking: cursor.blinking,
+        blinking: settings.cursor.blinking,
     };
+    config.scrolling_history = settings.scrollback_lines.max(1);
     config
 }
 
@@ -2802,6 +2469,17 @@ fn ctrl_sequence(key: &Key) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::TerminalSettings;
+
+    fn snapshot_line_text(snapshot: &TerminalSnapshot, line: usize) -> String {
+        let mut cells = snapshot
+            .cells
+            .iter()
+            .filter(|cell| cell.line == line)
+            .collect::<Vec<_>>();
+        cells.sort_by_key(|cell| cell.column);
+        cells.into_iter().map(|cell| cell.text.as_str()).collect()
+    }
 
     #[test]
     fn rasterize_glyph_produces_non_empty_mask() {
@@ -2813,6 +2491,7 @@ mod tests {
             cell_columns: 1,
             font_size_bits: font.size.to_bits(),
             line_height_bits: font.line_height.to_bits(),
+            thicken_bits: font.thicken.to_bits(),
             scale_factor_bits: 1.0f32.to_bits(),
             bold: false,
             italic: false,
@@ -2827,50 +2506,70 @@ mod tests {
     }
 
     #[test]
-    fn composed_surface_contains_non_background_pixels() {
+    fn rasterized_glyph_is_inserted_into_atlas() {
         let settings = FontSettings::default();
         let font = TerminalFont::from_settings(&settings);
-        let snapshot = TerminalSnapshot {
-            cells: vec![TerminalCell {
-                text: "A".into(),
-                fg: Color::BLACK,
-                bg: Color::WHITE,
-                underline: None,
-                underline_color: Color::BLACK,
-                width: 1,
-                bold: false,
-                italic: false,
-                dim: false,
-                hidden: false,
-                line: 0,
-                column: 0,
-            }],
-            cursor_line: 0,
-            cursor_column: 0,
-            cursor_shape: CursorShape::Hidden,
-            show_cursor: false,
-            background: Color::WHITE,
-            cursor_color: Color::BLACK,
+        let cell = TerminalCell {
+            text: "A".into(),
+            fg: Color::BLACK,
+            bg: Color::WHITE,
+            underline: None,
+            underline_color: Color::BLACK,
+            width: 1,
+            bold: false,
+            italic: false,
+            dim: false,
+            hidden: false,
+            line: 0,
+            column: 0,
         };
         let atlas = Arc::new(Mutex::new(GlyphAtlas::new()));
-        let surface = compose_terminal_surface(
-            &snapshot,
-            &font,
-            &atlas,
-            1.0,
-            Size::new(font.metrics.cell_width, font.metrics.cell_height),
-        )
-        .expect("surface should compose");
+        let glyph = rasterized_glyph_for_cell(&atlas, &font, 1.0, &cell)
+            .expect("glyph should be rasterized and cached");
+        let atlas = atlas.lock().expect("atlas should lock");
+        let page = atlas
+            .page(glyph.page_index)
+            .expect("glyph page should exist in atlas");
 
-        let bytes = match surface {
-            image::Handle::Rgba { pixels, .. } => pixels,
-            _ => panic!("expected raw rgba surface"),
-        };
+        let has_non_zero_coverage = page.pixels.iter().any(|coverage| *coverage > 0);
+        assert!(
+            has_non_zero_coverage,
+            "atlas page should contain glyph coverage"
+        );
+    }
 
-        let has_non_white = bytes
-            .chunks_exact(4)
-            .any(|px| px[0] != 255 || px[1] != 255 || px[2] != 255);
+    #[test]
+    fn snapshot_scrollback_lines_stay_on_separate_rows() {
+        let settings = TerminalSettings::default();
+        let theme = TerminalTheme::from_settings(&settings.colors);
+        let mut terminal = TerminalView::new(4, 2, &settings);
 
-        assert!(has_non_white, "surface should contain visible glyph pixels");
+        terminal.push_local_line("1111");
+        terminal.push_local_line("2222");
+        terminal.push_local_line("3333");
+        terminal.term.scroll_display(Scroll::Delta(2));
+
+        let snapshot = terminal.snapshot(&theme);
+
+        assert_eq!(snapshot_line_text(&snapshot, 0), "1111");
+        assert_eq!(snapshot_line_text(&snapshot, 1), "2222");
+    }
+
+    #[test]
+    fn alternate_screen_restores_primary_buffer() {
+        let settings = TerminalSettings::default();
+        let theme = TerminalTheme::from_settings(&settings.colors);
+        let mut terminal = TerminalView::new(8, 2, &settings);
+
+        terminal.feed(b"main");
+        terminal.feed(b"\x1b[?1049h");
+        terminal.feed(b"alt");
+        terminal.feed(b"\x1b[?1049l");
+
+        let snapshot = terminal.snapshot(&theme);
+
+        assert!(!terminal.term.mode().contains(TermMode::ALT_SCREEN));
+        assert_eq!(snapshot_line_text(&snapshot, 0).trim_end(), "main");
+        assert!(!snapshot_line_text(&snapshot, 0).contains("alt"));
     }
 }

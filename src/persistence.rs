@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::models::{Certificate, Identity, KnownHostEntry, Profile, ProfileType};
+use crate::models::{Identity, Key as SshKey, KnownHostEntry, Profile, ProfileType};
 
 #[derive(Debug, Clone)]
 pub struct AppPaths {
@@ -36,13 +36,51 @@ impl AppPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
     pub terminal: TerminalSettings,
+    #[serde(default)]
+    pub shortcuts: ShortcutSettings,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             terminal: TerminalSettings::default(),
+            shortcuts: ShortcutSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ShortcutSettings {
+    pub close_tab: String,
+    pub tab_switches: [String; 9],
+    pub previous_tab: String,
+    pub next_tab: String,
+    pub open_settings: String,
+    pub minimize_window: String,
+}
+
+impl Default for ShortcutSettings {
+    fn default() -> Self {
+        Self {
+            close_tab: "Command+W".into(),
+            tab_switches: [
+                "Command+1".into(),
+                "Command+2".into(),
+                "Command+3".into(),
+                "Command+4".into(),
+                "Command+5".into(),
+                "Command+6".into(),
+                "Command+7".into(),
+                "Command+8".into(),
+                "Command+9".into(),
+            ],
+            previous_tab: "Command+Shift+[".into(),
+            next_tab: "Command+Shift+]".into(),
+            open_settings: "Command+,".into(),
+            minimize_window: "Command+M".into(),
         }
     }
 }
@@ -50,6 +88,8 @@ impl Default for AppSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalSettings {
     pub default_theme_id: String,
+    #[serde(default = "default_scrollback_lines")]
+    pub scrollback_lines: usize,
     pub font: FontSettings,
     pub cursor: CursorSettings,
     pub colors: TerminalColors,
@@ -59,11 +99,16 @@ impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             default_theme_id: "atom-one-light".into(),
+            scrollback_lines: default_scrollback_lines(),
             font: FontSettings::default(),
             cursor: CursorSettings::default(),
             colors: TerminalColors::atom_one_light(),
         }
     }
+}
+
+fn default_scrollback_lines() -> usize {
+    10_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,8 +174,53 @@ impl Default for CursorSettings {
 pub struct TerminalColors {
     pub background: String,
     pub foreground: String,
-    pub cursor: String,
-    pub ansi_colors: [String; 16],
+    pub cursor_color: String,
+    pub cursor_text: String,
+    pub selection_background: String,
+    pub selection_foreground: String,
+    pub normal: TerminalAnsiGroup,
+    pub bright: TerminalAnsiGroup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalAnsiGroup {
+    pub black: String,
+    pub red: String,
+    pub green: String,
+    pub yellow: String,
+    pub blue: String,
+    pub magenta: String,
+    pub cyan: String,
+    pub white: String,
+}
+
+impl TerminalAnsiGroup {
+    pub fn as_array(&self) -> [String; 8] {
+        [
+            self.black.clone(),
+            self.red.clone(),
+            self.green.clone(),
+            self.yellow.clone(),
+            self.blue.clone(),
+            self.magenta.clone(),
+            self.cyan.clone(),
+            self.white.clone(),
+        ]
+    }
+
+    pub fn from_array(values: [String; 8]) -> Self {
+        let [black, red, green, yellow, blue, magenta, cyan, white] = values;
+        Self {
+            black,
+            red,
+            green,
+            yellow,
+            blue,
+            magenta,
+            cyan,
+            white,
+        }
+    }
 }
 
 impl TerminalColors {
@@ -138,31 +228,60 @@ impl TerminalColors {
         Self {
             background: "#fafafa".into(),
             foreground: "#383a42".into(),
-            cursor: "#526fff".into(),
-            ansi_colors: [
-                "#000000".into(),
-                "#e45649".into(),
-                "#50a14f".into(),
-                "#c18401".into(),
-                "#4078f2".into(),
-                "#a626a4".into(),
-                "#0184bc".into(),
-                "#a0a1a7".into(),
-                "#696c77".into(),
-                "#df6c75".into(),
-                "#6aaf69".into(),
-                "#e4c07b".into(),
-                "#61afef".into(),
-                "#c678dd".into(),
-                "#56b6c2".into(),
-                "#ffffff".into(),
-            ],
+            cursor_color: "#526fff".into(),
+            cursor_text: "#fafafa".into(),
+            selection_background: "#dbe9ff".into(),
+            selection_foreground: "#1f2329".into(),
+            normal: TerminalAnsiGroup {
+                black: "#000000".into(),
+                red: "#e45649".into(),
+                green: "#50a14f".into(),
+                yellow: "#c18401".into(),
+                blue: "#4078f2".into(),
+                magenta: "#a626a4".into(),
+                cyan: "#0184bc".into(),
+                white: "#a0a1a7".into(),
+            },
+            bright: TerminalAnsiGroup {
+                black: "#696c77".into(),
+                red: "#df6c75".into(),
+                green: "#6aaf69".into(),
+                yellow: "#e4c07b".into(),
+                blue: "#61afef".into(),
+                magenta: "#c678dd".into(),
+                cyan: "#56b6c2".into(),
+                white: "#ffffff".into(),
+            },
         }
     }
 }
 
 pub struct Database {
     path: PathBuf,
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut statement = connection.prepare(&pragma)?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let exists = columns
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == column);
+
+    if !exists {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+    }
+
+    Ok(())
 }
 
 impl Database {
@@ -188,22 +307,25 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 group_id INTEGER,
-                certificate_id INTEGER,
+                key_id INTEGER,
                 identity_id INTEGER,
                 host TEXT NOT NULL DEFAULT '',
                 port INTEGER NOT NULL DEFAULT 22,
                 username TEXT NOT NULL DEFAULT '',
                 password TEXT NOT NULL DEFAULT '',
                 theme_id TEXT NOT NULL DEFAULT 'default',
+                shell_path TEXT NOT NULL DEFAULT '',
+                work_dir TEXT NOT NULL DEFAULT '',
                 startup_command TEXT NOT NULL DEFAULT '',
                 type TEXT NOT NULL DEFAULT 'ssh'
             );
 
-            CREATE TABLE IF NOT EXISTS certificates (
+            CREATE TABLE IF NOT EXISTS keys (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 private_key TEXT NOT NULL DEFAULT '',
-                public_key TEXT NOT NULL DEFAULT ''
+                public_key TEXT NOT NULL DEFAULT '',
+                certificate TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS identities (
@@ -211,9 +333,29 @@ impl Database {
                 name TEXT NOT NULL,
                 username TEXT NOT NULL DEFAULT '',
                 password TEXT NOT NULL DEFAULT '',
-                certificate_id INTEGER
+                key_id INTEGER
             );
             "#,
+        )?;
+        ensure_column(&connection, "profiles", "key_id", "INTEGER")?;
+        ensure_column(
+            &connection,
+            "profiles",
+            "shell_path",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            &connection,
+            "profiles",
+            "work_dir",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(&connection, "identities", "key_id", "INTEGER")?;
+        ensure_column(
+            &connection,
+            "keys",
+            "certificate",
+            "TEXT NOT NULL DEFAULT ''",
         )?;
         Ok(())
     }
@@ -245,9 +387,29 @@ impl Database {
     pub fn list_profiles(&self) -> Result<Vec<Profile>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
-            "SELECT id, name, group_id, certificate_id, identity_id, host, port, username, password, theme_id, startup_command, type
+            "SELECT
+                profiles.id,
+                profiles.name,
+                profiles.group_id,
+                profiles.key_id,
+                COALESCE(profiles.key_id, identities.key_id) AS effective_key_id,
+                profiles.identity_id,
+                profiles.host,
+                profiles.port,
+                profiles.username,
+                CASE
+                    WHEN trim(profiles.username) <> '' THEN profiles.username
+                    ELSE COALESCE(identities.username, '')
+                END AS display_username,
+                profiles.password,
+                profiles.theme_id,
+                profiles.shell_path,
+                profiles.work_dir,
+                profiles.startup_command,
+                profiles.type
              FROM profiles
-             ORDER BY id DESC",
+             LEFT JOIN identities ON identities.id = profiles.identity_id
+             ORDER BY profiles.id DESC",
         )?;
 
         let rows = statement.query_map([], |row| {
@@ -255,15 +417,19 @@ impl Database {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 group_id: row.get(2)?,
-                certificate_id: row.get(3)?,
-                identity_id: row.get(4)?,
-                host: row.get(5)?,
-                port: row.get(6)?,
-                username: row.get(7)?,
-                password: row.get(8)?,
-                theme_id: row.get(9)?,
-                startup_command: row.get(10)?,
-                profile_type: ProfileType::from(row.get_ref(11)?.as_str()?),
+                key_id: row.get(3)?,
+                effective_key_id: row.get(4)?,
+                identity_id: row.get(5)?,
+                host: row.get(6)?,
+                port: row.get(7)?,
+                username: row.get(8)?,
+                display_username: row.get(9)?,
+                password: row.get(10)?,
+                theme_id: row.get(11)?,
+                shell_path: row.get(12)?,
+                work_dir: row.get(13)?,
+                startup_command: row.get(14)?,
+                profile_type: ProfileType::from(row.get_ref(15)?.as_str()?),
             })
         })?;
 
@@ -271,18 +437,19 @@ impl Database {
             .map_err(Into::into)
     }
 
-    pub fn list_certificates(&self) -> Result<Vec<Certificate>> {
+    pub fn list_keys(&self) -> Result<Vec<SshKey>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
-            "SELECT id, name, private_key, public_key FROM certificates ORDER BY id DESC",
+            "SELECT id, name, private_key, public_key, certificate FROM keys ORDER BY id DESC",
         )?;
 
         let rows = statement.query_map([], |row| {
-            Ok(Certificate {
+            Ok(SshKey {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 private_key: row.get(2)?,
                 public_key: row.get(3)?,
+                certificate: row.get(4)?,
             })
         })?;
 
@@ -293,7 +460,7 @@ impl Database {
     pub fn list_identities(&self) -> Result<Vec<Identity>> {
         let connection = self.open()?;
         let mut statement = connection.prepare(
-            "SELECT id, name, username, password, certificate_id FROM identities ORDER BY id DESC",
+            "SELECT id, name, username, password, key_id FROM identities ORDER BY id DESC",
         )?;
 
         let rows = statement.query_map([], |row| {
@@ -302,7 +469,7 @@ impl Database {
                 name: row.get(1)?,
                 username: row.get(2)?,
                 password: row.get(3)?,
-                certificate_id: row.get(4)?,
+                key_id: row.get(4)?,
             })
         })?;
 
@@ -315,18 +482,20 @@ impl Database {
 
         if profile.id == 0 {
             connection.execute(
-                "INSERT INTO profiles (name, group_id, certificate_id, identity_id, host, port, username, password, theme_id, startup_command, type)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO profiles (name, group_id, key_id, identity_id, host, port, username, password, theme_id, shell_path, work_dir, startup_command, type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     profile.name,
                     profile.group_id,
-                    profile.certificate_id,
+                    profile.key_id,
                     profile.identity_id,
                     profile.host,
                     profile.port,
                     profile.username,
                     profile.password,
                     profile.theme_id,
+                    profile.shell_path,
+                    profile.work_dir,
                     profile.startup_command,
                     profile.profile_type.as_str(),
                 ],
@@ -335,18 +504,20 @@ impl Database {
         } else {
             connection.execute(
                 "UPDATE profiles
-                 SET name=?1, group_id=?2, certificate_id=?3, identity_id=?4, host=?5, port=?6, username=?7, password=?8, theme_id=?9, startup_command=?10, type=?11
-                 WHERE id=?12",
+                 SET name=?1, group_id=?2, key_id=?3, identity_id=?4, host=?5, port=?6, username=?7, password=?8, theme_id=?9, shell_path=?10, work_dir=?11, startup_command=?12, type=?13
+                 WHERE id=?14",
                 params![
                     profile.name,
                     profile.group_id,
-                    profile.certificate_id,
+                    profile.key_id,
                     profile.identity_id,
                     profile.host,
                     profile.port,
                     profile.username,
                     profile.password,
                     profile.theme_id,
+                    profile.shell_path,
+                    profile.work_dir,
                     profile.startup_command,
                     profile.profile_type.as_str(),
                     profile.id,
@@ -357,27 +528,29 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_certificate(&self, certificate: &mut Certificate) -> Result<()> {
+    pub fn save_key(&self, key: &mut SshKey) -> Result<()> {
         let connection = self.open()?;
 
-        if certificate.id == 0 {
+        if key.id == 0 {
             connection.execute(
-                "INSERT INTO certificates (name, private_key, public_key) VALUES (?1, ?2, ?3)",
+                "INSERT INTO keys (name, private_key, public_key, certificate) VALUES (?1, ?2, ?3, ?4)",
                 params![
-                    certificate.name,
-                    certificate.private_key,
-                    certificate.public_key
+                    key.name,
+                    key.private_key,
+                    key.public_key,
+                    key.certificate
                 ],
             )?;
-            certificate.id = connection.last_insert_rowid();
+            key.id = connection.last_insert_rowid();
         } else {
             connection.execute(
-                "UPDATE certificates SET name=?1, private_key=?2, public_key=?3 WHERE id=?4",
+                "UPDATE keys SET name=?1, private_key=?2, public_key=?3, certificate=?4 WHERE id=?5",
                 params![
-                    certificate.name,
-                    certificate.private_key,
-                    certificate.public_key,
-                    certificate.id,
+                    key.name,
+                    key.private_key,
+                    key.public_key,
+                    key.certificate,
+                    key.id,
                 ],
             )?;
         }
@@ -390,23 +563,23 @@ impl Database {
 
         if identity.id == 0 {
             connection.execute(
-                "INSERT INTO identities (name, username, password, certificate_id) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO identities (name, username, password, key_id) VALUES (?1, ?2, ?3, ?4)",
                 params![
                     identity.name,
                     identity.username,
                     identity.password,
-                    identity.certificate_id,
+                    identity.key_id,
                 ],
             )?;
             identity.id = connection.last_insert_rowid();
         } else {
             connection.execute(
-                "UPDATE identities SET name=?1, username=?2, password=?3, certificate_id=?4 WHERE id=?5",
+                "UPDATE identities SET name=?1, username=?2, password=?3, key_id=?4 WHERE id=?5",
                 params![
                     identity.name,
                     identity.username,
                     identity.password,
-                    identity.certificate_id,
+                    identity.key_id,
                     identity.id,
                 ],
             )?;

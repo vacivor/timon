@@ -35,13 +35,17 @@ pub struct Profile {
     pub id: i64,
     pub name: String,
     pub group_id: Option<i64>,
-    pub certificate_id: Option<i64>,
+    pub key_id: Option<i64>,
+    pub effective_key_id: Option<i64>,
     pub identity_id: Option<i64>,
     pub host: String,
     pub port: i64,
     pub username: String,
+    pub display_username: String,
     pub password: String,
     pub theme_id: String,
+    pub shell_path: String,
+    pub work_dir: String,
     pub startup_command: String,
     pub profile_type: ProfileType,
 }
@@ -52,13 +56,17 @@ impl Default for Profile {
             id: 0,
             name: "New Profile".into(),
             group_id: None,
-            certificate_id: None,
+            key_id: None,
+            effective_key_id: None,
             identity_id: None,
             host: String::new(),
             port: 22,
             username: String::new(),
+            display_username: String::new(),
             password: String::new(),
             theme_id: "default".into(),
+            shell_path: String::new(),
+            work_dir: String::new(),
             startup_command: String::new(),
             profile_type: ProfileType::Ssh,
         }
@@ -66,20 +74,22 @@ impl Default for Profile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Certificate {
+pub struct Key {
     pub id: i64,
     pub name: String,
     pub private_key: String,
     pub public_key: String,
+    pub certificate: String,
 }
 
-impl Default for Certificate {
+impl Default for Key {
     fn default() -> Self {
         Self {
             id: 0,
-            name: "New Certificate".into(),
+            name: "New Key".into(),
             private_key: String::new(),
             public_key: String::new(),
+            certificate: String::new(),
         }
     }
 }
@@ -90,7 +100,7 @@ pub struct Identity {
     pub name: String,
     pub username: String,
     pub password: String,
-    pub certificate_id: Option<i64>,
+    pub key_id: Option<i64>,
 }
 
 impl Default for Identity {
@@ -100,7 +110,7 @@ impl Default for Identity {
             name: "New Identity".into(),
             username: String::new(),
             password: String::new(),
-            certificate_id: None,
+            key_id: None,
         }
     }
 }

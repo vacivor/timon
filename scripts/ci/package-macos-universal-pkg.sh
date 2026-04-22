@@ -59,9 +59,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 EOF
 
 mkdir -p "${DIST_DIR}"
-pkgbuild \
+productbuild \
   --component "${APP_DIR}" \
-  --identifier "${BUNDLE_ID}" \
-  --version "${VERSION}" \
-  --install-location "/Applications" \
+  "/Applications" \
   "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"

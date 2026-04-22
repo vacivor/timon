@@ -55,9 +55,7 @@ EOF
 mkdir -p "${DIST_DIR}"
 rm -f "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
 ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
-pkgbuild \
+productbuild \
   --component "${APP_DIR}" \
-  --identifier "${BUNDLE_ID}" \
-  --version "${VERSION}" \
-  --install-location "/Applications" \
+  "/Applications" \
   "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"

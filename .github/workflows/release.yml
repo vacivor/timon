@@ -12,7 +12,7 @@ permissions:
 env:
   APP_NAME: Timon
   APP_ID: io.vacivor.timon
-  BINARY_NAME: timon
+  BINARY_NAME: Timon
   PROFILE: release
 
 jobs:
@@ -25,19 +25,20 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             archive: timon-macos-aarch64
+            make_app_target: package-macos-arm64-app
+            make_pkg_target: package-macos-arm64-pkg
           - target: x86_64-apple-darwin
             archive: timon-macos-x86_64
+            make_app_target: package-macos-x86_64-app
+            make_pkg_target: package-macos-x86_64-pkg
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: chmod +x ./scripts/ci/*.sh
-      - env:
-          TARGET_TRIPLE: ${{ matrix.target }}
-          ARCHIVE_PREFIX: ${{ matrix.archive }}
-        run: ./scripts/ci/package-macos.sh
+      - run: make ${{ matrix.make_app_target }}
+      - run: make ${{ matrix.make_pkg_target }}
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -53,64 +54,7 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-      - run: chmod +x ./scripts/ci/*.sh
-      - env:
-          ARM_TRIPLE: aarch64-apple-darwin
-          X64_TRIPLE: x86_64-apple-darwin
-          ARCHIVE_PREFIX: timon-macos-universal
-        run: ./scripts/ci/package-macos-universal-pkg.sh
+      - run: make package-macos-universal-pkg
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/timon-macos-universal.pkg
-
-  linux:
-    name: Linux release (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: timon-linux-x86_64
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            archive: timon-linux-aarch64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - run: chmod +x ./scripts/ci/*.sh
-      - run: ./scripts/ci/install-linux-deps.sh
-      - run: cargo install cargo-deb cargo-generate-rpm --locked
-      - env:
-          TARGET_TRIPLE: ${{ matrix.target }}
-          ARCHIVE_PREFIX: ${{ matrix.archive }}
-        run: ./scripts/ci/package-linux.sh
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/${{ matrix.archive }}.deb
-            dist/${{ matrix.archive }}.rpm
-            dist/${{ matrix.archive }}.AppImage
-            dist/${{ matrix.archive }}.flatpak
-
-  windows:
-    name: Windows release
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-      - env:
-          TARGET_TRIPLE: x86_64-pc-windows-msvc
-          ARCHIVE_BASENAME: timon-windows-x86_64
-        shell: pwsh
-        run: .\scripts\ci\build-windows.ps1
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/timon-windows-x86_64.zip

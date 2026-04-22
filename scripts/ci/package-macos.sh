@@ -9,6 +9,14 @@ DIST_DIR="${DIST_DIR:-dist}"
 TARGET_TRIPLE="${TARGET_TRIPLE:?TARGET_TRIPLE is required}"
 VERSION="${VERSION:-$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -n 1)}"
 ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-timon-macos}"
+OUTPUTS="${OUTPUTS:-app,pkg}"
+
+has_output() {
+  case ",${OUTPUTS}," in
+    *,"$1",*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 cargo build --locked --profile "${PROFILE}" --target "${TARGET_TRIPLE}"
 
@@ -53,9 +61,15 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 EOF
 
 mkdir -p "${DIST_DIR}"
-rm -f "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
-ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
-productbuild \
-  --component "${APP_DIR}" \
-  "/Applications" \
-  "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"
+
+if has_output app; then
+  rm -f "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
+  ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
+fi
+
+if has_output pkg; then
+  productbuild \
+    --component "${APP_DIR}" \
+    "/Applications" \
+    "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"
+fi

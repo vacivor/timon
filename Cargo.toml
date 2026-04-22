@@ -33,27 +33,3 @@ category = "Developer Tool"
 [package.metadata.packager]
 product-name = "Timon"
 identifier = "io.vacivor.timon"
-
-[package.metadata.deb]
-name = "timon"
-maintainer = "Vacivor"
-copyright = "2026, Vacivor"
-section = "utils"
-priority = "optional"
-depends = "$auto"
-assets = [
-  ["packaging/linux/io.vacivor.timon.desktop", "usr/share/applications/io.vacivor.timon.desktop", "644"],
-  ["packaging/linux/io.vacivor.timon.metainfo.xml", "usr/share/metainfo/io.vacivor.timon.metainfo.xml", "644"],
-  ["packaging/linux/io.vacivor.timon.svg", "usr/share/icons/hicolor/scalable/apps/io.vacivor.timon.svg", "644"],
-]
-
-[package.metadata.generate-rpm]
-name = "timon"
-summary = "SSH and local terminal client rendered with iced"
-license = "Proprietary"
-assets = [
-  { source = "target/release/timon", dest = "/usr/bin/timon", mode = "0755" },
-  { source = "packaging/linux/io.vacivor.timon.desktop", dest = "/usr/share/applications/io.vacivor.timon.desktop", mode = "0644" },
-  { source = "packaging/linux/io.vacivor.timon.metainfo.xml", dest = "/usr/share/metainfo/io.vacivor.timon.metainfo.xml", mode = "0644" },
-  { source = "packaging/linux/io.vacivor.timon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.vacivor.timon.svg", mode = "0644" },
-]

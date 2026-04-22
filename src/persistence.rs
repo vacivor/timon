@@ -16,9 +16,7 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn discover() -> Result<Self> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("无法定位 HOME 目录")?;
+        let home = user_home_dir().context("无法定位用户目录")?;
         let root = home.join(".timon");
         let database = root.join("timon.sqlite3");
         let settings = root.join("settings.json");
@@ -32,6 +30,26 @@ impl AppPaths {
             known_hosts,
         })
     }
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            if drive.is_empty() || path.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(drive).join(path))
+            }
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

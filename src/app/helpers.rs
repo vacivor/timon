@@ -305,11 +305,23 @@ pub(crate) fn shell_display_name(shell_path: &str) -> String {
 }
 
 pub(crate) fn local_terminal_tab_title(profile: &Profile) -> String {
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+    let user = current_local_username();
     let host = local_machine_name();
     let path = local_work_dir_label(&profile.work_dir);
 
     format!("{user}@{host}:{path}")
+}
+
+fn current_local_username() -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "user".into())
 }
 
 fn local_machine_name() -> String {
@@ -317,6 +329,13 @@ fn local_machine_name() -> String {
         let trimmed = hostname.trim();
         if !trimmed.is_empty() {
             return trimmed.split('.').next().unwrap_or(trimmed).to_string();
+        }
+    }
+
+    if let Ok(hostname) = std::env::var("COMPUTERNAME") {
+        let trimmed = hostname.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
         }
     }
 
@@ -337,7 +356,7 @@ fn local_work_dir_label(work_dir: &str) -> String {
         return "~".into();
     }
 
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(home) = current_home_dir() {
         if trimmed == home {
             return "~".into();
         }
@@ -352,6 +371,28 @@ fn local_work_dir_label(work_dir: &str) -> String {
     }
 
     trimmed.to_string()
+}
+
+fn current_home_dir() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USERPROFILE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            let drive = std::env::var("HOMEDRIVE").ok()?;
+            let path = std::env::var("HOMEPATH").ok()?;
+            let drive = drive.trim();
+            let path = path.trim();
+            if drive.is_empty() || path.is_empty() {
+                None
+            } else {
+                Some(format!("{drive}{path}"))
+            }
+        })
 }
 
 pub(crate) fn empty_as_dash(value: &str) -> String {

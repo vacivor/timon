@@ -211,7 +211,15 @@ fn resolved_local_work_dir(profile: &Profile) -> String {
 
 #[cfg(target_os = "macos")]
 fn build_local_command(profile: &Profile, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
-    let user = std::env::var("USER").unwrap_or_else(|_| "admin".into());
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .unwrap_or_else(|| "admin".into());
     if profile.shell_path.trim().is_empty() && work_dir.trim().is_empty() {
         let mut command = CommandBuilder::new("/usr/bin/login");
         command.args(["-flp", &user]);

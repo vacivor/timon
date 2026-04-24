@@ -10,6 +10,8 @@ TARGET_TRIPLE="${TARGET_TRIPLE:?TARGET_TRIPLE is required}"
 VERSION="${VERSION:-$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -n 1)}"
 ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-timon-macos}"
 OUTPUTS="${OUTPUTS:-app,pkg}"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+PKG_SIGN_IDENTITY="${PKG_SIGN_IDENTITY:-}"
 
 has_output() {
   case ",${OUTPUTS}," in
@@ -62,14 +64,29 @@ EOF
 
 mkdir -p "${DIST_DIR}"
 
+if [[ -n "${SIGN_IDENTITY}" ]]; then
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --sign "${SIGN_IDENTITY}" \
+    "${APP_DIR}"
+
+  codesign --verify --deep --strict "${APP_DIR}"
+fi
+
 if has_output app; then
   rm -f "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
   ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
 fi
 
 if has_output pkg; then
-  productbuild \
-    --component "${APP_DIR}" \
-    "/Applications" \
-    "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"
+  productbuild_args=()
+
+  if [[ -n "${PKG_SIGN_IDENTITY}" ]]; then
+    productbuild_args+=(--sign "${PKG_SIGN_IDENTITY}")
+  fi
+
+  productbuild_args+=(--component "${APP_DIR}" "/Applications")
+  productbuild "${productbuild_args[@]}" "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"
 fi

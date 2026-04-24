@@ -23,4 +23,14 @@ This repository ships packaging scaffolding for:
 
 ## Notes
 
-- The current packaging setup is unsigned. macOS notarization is not configured yet.
+- macOS `.app` bundles are signed by default with ad-hoc signing (`SIGN_IDENTITY=-`).
+- Set `SIGN_IDENTITY` to use a specific local or imported code-signing identity for `.app` bundles.
+- Set `PKG_SIGN_IDENTITY` to sign `.pkg` installers with `productbuild --sign`.
+- GitHub Actions can import a `.p12` signing certificate when these secrets are configured:
+  - `MACOS_CERTIFICATE_BASE64`: base64-encoded `.p12` file.
+  - `MACOS_CERTIFICATE_PASSWORD`: password for the `.p12` file.
+  - `MACOS_KEYCHAIN_PASSWORD`: temporary CI keychain password.
+- GitHub Actions reads signing identities from repository variables or secrets:
+  - `MACOS_SIGN_IDENTITY`: app signing identity. Defaults to `-` for ad-hoc signing.
+  - `MACOS_PKG_SIGN_IDENTITY`: installer signing identity. Empty means the `.pkg` is not signed.
+- macOS notarization is not configured yet.

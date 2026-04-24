@@ -11,6 +11,7 @@ on:
 env:
   APP_NAME: Timon
   APP_ID: io.vacivor.timon
+  BUNDLE_ID: io.vacivor.timon
   BINARY_NAME: Timon
   PROFILE: release
 
@@ -18,6 +19,9 @@ jobs:
   macos:
     name: macOS packages (${{ matrix.target }})
     runs-on: macos-14
+    env:
+      SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || vars.MACOS_SIGN_IDENTITY || '-' }}
+      PKG_SIGN_IDENTITY: ${{ secrets.MACOS_PKG_SIGN_IDENTITY || vars.MACOS_PKG_SIGN_IDENTITY || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,6 +46,30 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Import macOS signing certificate
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "${MACOS_CERTIFICATE_BASE64}" ]; then
+            echo "No macOS signing certificate configured; app bundles will use ad-hoc signing."
+            exit 0
+          fi
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/timon-signing.keychain-db"
+          CERTIFICATE_PATH="${RUNNER_TEMP}/timon-signing.p12"
+          KEYCHAIN_PASSWORD="${MACOS_KEYCHAIN_PASSWORD:-timon-signing}"
+
+          echo "${MACOS_CERTIFICATE_BASE64}" | base64 -D > "${CERTIFICATE_PATH}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERTIFICATE_PATH}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security find-identity -v "${KEYCHAIN_PATH}"
+
       - name: Build macOS app
         run: make ${{ matrix.make_app_target }}
 
@@ -52,7 +80,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}-app
-          path: dist/macos/${{ matrix.target }}/Timon.app
+          path: dist/${{ matrix.archive }}.app.zip
 
       - name: Upload macOS pkg
         uses: actions/upload-artifact@v4
@@ -63,6 +91,9 @@ jobs:
   macos-universal-pkg:
     name: macOS universal pkg
     runs-on: macos-14
+    env:
+      SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || vars.MACOS_SIGN_IDENTITY || '-' }}
+      PKG_SIGN_IDENTITY: ${{ secrets.MACOS_PKG_SIGN_IDENTITY || vars.MACOS_PKG_SIGN_IDENTITY || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,6 +105,30 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Import macOS signing certificate
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -z "${MACOS_CERTIFICATE_BASE64}" ]; then
+            echo "No macOS signing certificate configured; app bundles will use ad-hoc signing."
+            exit 0
+          fi
+
+          KEYCHAIN_PATH="${RUNNER_TEMP}/timon-signing.keychain-db"
+          CERTIFICATE_PATH="${RUNNER_TEMP}/timon-signing.p12"
+          KEYCHAIN_PASSWORD="${MACOS_KEYCHAIN_PASSWORD:-timon-signing}"
+
+          echo "${MACOS_CERTIFICATE_BASE64}" | base64 -D > "${CERTIFICATE_PATH}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERTIFICATE_PATH}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security find-identity -v "${KEYCHAIN_PATH}"
 
       - name: Build universal macOS pkg
         run: make package-macos-universal-pkg

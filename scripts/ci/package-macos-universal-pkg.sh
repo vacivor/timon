@@ -10,6 +10,8 @@ ARM_TRIPLE="${ARM_TRIPLE:-aarch64-apple-darwin}"
 X64_TRIPLE="${X64_TRIPLE:-x86_64-apple-darwin}"
 VERSION="${VERSION:-$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -n 1)}"
 ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-timon-macos-universal}"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+PKG_SIGN_IDENTITY="${PKG_SIGN_IDENTITY:-}"
 
 cargo build --locked --profile "${PROFILE}" --target "${ARM_TRIPLE}"
 cargo build --locked --profile "${PROFILE}" --target "${X64_TRIPLE}"
@@ -59,7 +61,23 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 EOF
 
 mkdir -p "${DIST_DIR}"
-productbuild \
-  --component "${APP_DIR}" \
-  "/Applications" \
-  "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"
+
+if [[ -n "${SIGN_IDENTITY}" ]]; then
+  codesign \
+    --force \
+    --deep \
+    --options runtime \
+    --sign "${SIGN_IDENTITY}" \
+    "${APP_DIR}"
+
+  codesign --verify --deep --strict "${APP_DIR}"
+fi
+
+productbuild_args=()
+
+if [[ -n "${PKG_SIGN_IDENTITY}" ]]; then
+  productbuild_args+=(--sign "${PKG_SIGN_IDENTITY}")
+fi
+
+productbuild_args+=(--component "${APP_DIR}" "/Applications")
+productbuild "${productbuild_args[@]}" "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"

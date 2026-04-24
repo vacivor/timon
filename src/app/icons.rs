@@ -49,6 +49,16 @@ fn settings_handle() -> svg::Handle {
     )
 }
 
+fn terminal_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/terminal.svg"), &HANDLE)
+}
+
+fn cable_handle() -> svg::Handle {
+    static HANDLE: OnceLock<svg::Handle> = OnceLock::new();
+    handle(include_bytes!("../../assets/lucide/cable.svg"), &HANDLE)
+}
+
 pub(crate) fn manage_menu_icon(
     menu: ManageMenu,
     color: Color,
@@ -66,5 +76,22 @@ pub(crate) fn manage_menu_icon(
     svg(handle)
         .width(Length::Fixed(18.0))
         .height(Length::Fixed(18.0))
+        .style(move |_theme, _status| iced::widget::svg::Style { color: Some(color) })
+}
+
+pub(crate) fn connection_type_icon(
+    connection_type: ConnectionType,
+    color: Color,
+    size: f32,
+) -> iced::widget::svg::Svg<'static, Theme> {
+    let handle = match connection_type {
+        ConnectionType::Ssh => connections_handle(),
+        ConnectionType::Local => terminal_handle(),
+        ConnectionType::Serial => cable_handle(),
+    };
+
+    svg(handle)
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
         .style(move |_theme, _status| iced::widget::svg::Style { color: Some(color) })
 }

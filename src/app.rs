@@ -33,7 +33,7 @@ use crate::session::{
 use crate::terminal::{
     GlyphAtlas, TerminalAtlas, TerminalCanvasEvent, TerminalEvent, TerminalFont, TerminalPoint,
     TerminalSelection, TerminalSnapshot, TerminalTheme, TerminalView, available_terminal_fonts,
-    canonical_terminal_font_name,
+    canonical_terminal_font_name, prewarm_glyph_atlas,
 };
 
 mod constants;

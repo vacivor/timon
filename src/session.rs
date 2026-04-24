@@ -1,7 +1,16 @@
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
+use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Context, Result, anyhow};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -141,6 +150,8 @@ pub async fn connect_target(
             .map_err(|error| format!("SSH 连接失败: {error:#}")),
         ConnectionType::Local => connect_local_session(target, event_tx)
             .map_err(|error| format!("本地终端启动失败: {error:#}")),
+        ConnectionType::Serial => connect_serial_session(target, event_tx)
+            .map_err(|error| format!("Serial 连接失败: {error:#}")),
     }
 }
 
@@ -387,6 +398,165 @@ fn connect_local_session(
     });
 
     Ok(SessionHandle { command_tx })
+}
+
+#[cfg(unix)]
+fn connect_serial_session(
+    target: ConnectionTarget,
+    event_tx: mpsc::UnboundedSender<SessionEvent>,
+) -> Result<SessionHandle> {
+    let device = target.connection.serial_port.trim();
+    if device.is_empty() {
+        return Err(anyhow!("串口设备路径不能为空"));
+    }
+
+    let baud_rate = target.connection.baud_rate;
+    let port = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(device)
+        .with_context(|| format!("无法打开串口设备 {device}"))?;
+
+    configure_serial_port(port.as_raw_fd(), baud_rate)?;
+
+    let mut reader = port
+        .try_clone()
+        .with_context(|| format!("无法克隆串口 reader {device}"))?;
+    let writer = Arc::new(Mutex::new(port));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+
+    let _ = event_tx.send(SessionEvent::Connected {
+        description: format!("{device} @ {baud_rate}"),
+    });
+
+    if !target.connection.startup_command.trim().is_empty() {
+        let startup_command = target.connection.startup_command.clone();
+        if let Ok(mut guard) = writer.lock() {
+            let _ = guard.write_all(startup_command.as_bytes());
+            let _ = guard.write_all(b"\n");
+            let _ = guard.flush();
+        }
+    }
+
+    {
+        let event_tx = event_tx.clone();
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            while !stop.load(Ordering::Relaxed) {
+                match reader.read(&mut buffer) {
+                    Ok(0) => thread::sleep(Duration::from_millis(10)),
+                    Ok(read) => {
+                        let _ = event_tx.send(SessionEvent::Output(buffer[..read].to_vec()));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        let _ =
+                            event_tx.send(SessionEvent::Error(format!("读取串口失败: {error}")));
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                SessionCommand::Input(data) => {
+                    if let Ok(mut guard) = writer.lock() {
+                        let _ = guard.write_all(&data);
+                        let _ = guard.flush();
+                    }
+                }
+                SessionCommand::Resize { .. } => {}
+                SessionCommand::Disconnect(reason) => {
+                    stop.store(true, Ordering::Relaxed);
+                    let _ = event_tx.send(SessionEvent::Disconnected(reason));
+                    return;
+                }
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+    });
+
+    Ok(SessionHandle { command_tx })
+}
+
+#[cfg(not(unix))]
+fn connect_serial_session(
+    _target: ConnectionTarget,
+    _event_tx: mpsc::UnboundedSender<SessionEvent>,
+) -> Result<SessionHandle> {
+    Err(anyhow!("当前平台暂不支持 Serial 连接"))
+}
+
+#[cfg(unix)]
+fn configure_serial_port(fd: std::os::fd::RawFd, baud_rate: i64) -> Result<()> {
+    let speed = serial_baud_rate(baud_rate)?;
+
+    unsafe {
+        let mut settings = std::mem::zeroed::<libc::termios>();
+        if libc::tcgetattr(fd, &mut settings) != 0 {
+            return Err(std::io::Error::last_os_error()).context("读取串口参数失败");
+        }
+
+        libc::cfmakeraw(&mut settings);
+
+        if libc::cfsetispeed(&mut settings, speed) != 0
+            || libc::cfsetospeed(&mut settings, speed) != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("设置串口波特率失败");
+        }
+
+        settings.c_cflag |= libc::CLOCAL | libc::CREAD;
+        settings.c_cflag &= !libc::PARENB;
+        settings.c_cflag &= !libc::CSTOPB;
+        settings.c_cflag &= !libc::CSIZE;
+        settings.c_cflag |= libc::CS8;
+        settings.c_iflag &= !(libc::IXON | libc::IXOFF | libc::IXANY);
+        settings.c_cc[libc::VMIN] = 0;
+        settings.c_cc[libc::VTIME] = 1;
+
+        if libc::tcsetattr(fd, libc::TCSANOW, &settings) != 0 {
+            return Err(std::io::Error::last_os_error()).context("应用串口参数失败");
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn serial_baud_rate(baud_rate: i64) -> Result<libc::speed_t> {
+    match baud_rate {
+        50 => Ok(libc::B50),
+        75 => Ok(libc::B75),
+        110 => Ok(libc::B110),
+        134 => Ok(libc::B134),
+        150 => Ok(libc::B150),
+        200 => Ok(libc::B200),
+        300 => Ok(libc::B300),
+        600 => Ok(libc::B600),
+        1200 => Ok(libc::B1200),
+        1800 => Ok(libc::B1800),
+        2400 => Ok(libc::B2400),
+        4800 => Ok(libc::B4800),
+        9600 => Ok(libc::B9600),
+        19200 => Ok(libc::B19200),
+        38400 => Ok(libc::B38400),
+        57600 => Ok(libc::B57600),
+        115200 => Ok(libc::B115200),
+        230400 => Ok(libc::B230400),
+        _ => Err(anyhow!(
+            "不支持的串口波特率 {baud_rate}，当前支持 50-230400"
+        )),
+    }
 }
 
 fn resolved_local_shell_path(connection: &Connection) -> String {

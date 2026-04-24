@@ -477,6 +477,8 @@ impl Database {
                 shell_path TEXT NOT NULL DEFAULT '',
                 work_dir TEXT NOT NULL DEFAULT '',
                 startup_command TEXT NOT NULL DEFAULT '',
+                serial_port TEXT NOT NULL DEFAULT '',
+                baud_rate INTEGER NOT NULL DEFAULT 115200,
                 type TEXT NOT NULL DEFAULT 'ssh'
             );
 
@@ -537,6 +539,18 @@ impl Database {
         )?;
         ensure_column(&connection, "groups", "parent_id", "INTEGER")?;
         ensure_column(&connection, "port_forwards", "connection_id", "INTEGER")?;
+        ensure_column(
+            &connection,
+            "connections",
+            "serial_port",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            &connection,
+            "connections",
+            "baud_rate",
+            "INTEGER NOT NULL DEFAULT 115200",
+        )?;
         Ok(())
     }
 
@@ -586,6 +600,8 @@ impl Database {
                 connections.shell_path,
                 connections.work_dir,
                 connections.startup_command,
+                connections.serial_port,
+                connections.baud_rate,
                 connections.type
              FROM connections
              LEFT JOIN identities ON identities.id = connections.identity_id
@@ -609,7 +625,9 @@ impl Database {
                 shell_path: row.get(12)?,
                 work_dir: row.get(13)?,
                 startup_command: row.get(14)?,
-                connection_type: ConnectionType::from(row.get_ref(15)?.as_str()?),
+                serial_port: row.get(15)?,
+                baud_rate: row.get(16)?,
+                connection_type: ConnectionType::from(row.get_ref(17)?.as_str()?),
             })
         })?;
 
@@ -720,8 +738,8 @@ impl Database {
 
         if connection_model.id == 0 {
             connection.execute(
-                "INSERT INTO connections (name, group_id, key_id, identity_id, host, port, username, password, theme_id, shell_path, work_dir, startup_command, type)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO connections (name, group_id, key_id, identity_id, host, port, username, password, theme_id, shell_path, work_dir, startup_command, serial_port, baud_rate, type)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     connection_model.name,
                     connection_model.group_id,
@@ -735,6 +753,8 @@ impl Database {
                     connection_model.shell_path,
                     connection_model.work_dir,
                     connection_model.startup_command,
+                    connection_model.serial_port,
+                    connection_model.baud_rate,
                     connection_model.connection_type.as_str(),
                 ],
             )?;
@@ -742,8 +762,8 @@ impl Database {
         } else {
             connection.execute(
                 "UPDATE connections
-                 SET name=?1, group_id=?2, key_id=?3, identity_id=?4, host=?5, port=?6, username=?7, password=?8, theme_id=?9, shell_path=?10, work_dir=?11, startup_command=?12, type=?13
-                 WHERE id=?14",
+                 SET name=?1, group_id=?2, key_id=?3, identity_id=?4, host=?5, port=?6, username=?7, password=?8, theme_id=?9, shell_path=?10, work_dir=?11, startup_command=?12, serial_port=?13, baud_rate=?14, type=?15
+                 WHERE id=?16",
                 params![
                     connection_model.name,
                     connection_model.group_id,
@@ -757,6 +777,8 @@ impl Database {
                     connection_model.shell_path,
                     connection_model.work_dir,
                     connection_model.startup_command,
+                    connection_model.serial_port,
+                    connection_model.baud_rate,
                     connection_model.connection_type.as_str(),
                     connection_model.id,
                 ],

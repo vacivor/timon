@@ -135,6 +135,24 @@ pub(crate) fn settings_window_settings() -> window::Settings {
     }
 }
 
+pub(crate) fn ui_default_font() -> iced::Font {
+    iced::Font::DEFAULT
+}
+
+pub(crate) fn ui_font_weight(weight: iced::font::Weight) -> iced::Font {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = weight;
+        return ui_default_font();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    iced::Font {
+        weight,
+        ..ui_default_font()
+    }
+}
+
 pub(crate) fn parse_optional_i64(value: &str) -> Option<i64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

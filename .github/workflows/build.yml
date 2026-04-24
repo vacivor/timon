@@ -21,7 +21,6 @@ jobs:
     runs-on: macos-14
     env:
       SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || vars.MACOS_SIGN_IDENTITY || '-' }}
-      PKG_SIGN_IDENTITY: ${{ secrets.MACOS_PKG_SIGN_IDENTITY || vars.MACOS_PKG_SIGN_IDENTITY || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -29,11 +28,11 @@ jobs:
           - target: aarch64-apple-darwin
             archive: timon-macos-aarch64
             make_app_target: package-macos-arm64-app
-            make_pkg_target: package-macos-arm64-pkg
+            make_dmg_target: package-macos-arm64-dmg
           - target: x86_64-apple-darwin
             archive: timon-macos-x86_64
             make_app_target: package-macos-x86_64-app
-            make_pkg_target: package-macos-x86_64-pkg
+            make_dmg_target: package-macos-x86_64-dmg
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,8 +72,8 @@ jobs:
       - name: Build macOS app
         run: make ${{ matrix.make_app_target }}
 
-      - name: Build macOS pkg
-        run: make ${{ matrix.make_pkg_target }}
+      - name: Build macOS dmg
+        run: make ${{ matrix.make_dmg_target }}
 
       - name: Stage macOS app artifact
         run: |
@@ -89,18 +88,17 @@ jobs:
           name: ${{ matrix.archive }}-app
           path: dist/artifacts/${{ matrix.archive }}-app
 
-      - name: Upload macOS pkg
+      - name: Upload macOS dmg
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive }}-pkg
-          path: dist/${{ matrix.archive }}.pkg
+          name: ${{ matrix.archive }}-dmg
+          path: dist/${{ matrix.archive }}.dmg
 
-  macos-universal-pkg:
-    name: macOS universal pkg
+  macos-universal-dmg:
+    name: macOS universal dmg
     runs-on: macos-14
     env:
       SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || vars.MACOS_SIGN_IDENTITY || '-' }}
-      PKG_SIGN_IDENTITY: ${{ secrets.MACOS_PKG_SIGN_IDENTITY || vars.MACOS_PKG_SIGN_IDENTITY || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -137,11 +135,17 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
           security find-identity -v "${KEYCHAIN_PATH}"
 
-      - name: Build universal macOS pkg
-        run: make package-macos-universal-pkg
+      - name: Build universal macOS dmg
+        run: make package-macos-universal-dmg
 
-      - name: Upload universal macOS pkg
+      - name: Upload universal macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: timon-macos-universal-pkg
-          path: dist/timon-macos-universal.pkg
+          name: timon-macos-universal-app
+          path: dist/timon-macos-universal.app.zip
+
+      - name: Upload universal macOS dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: timon-macos-universal-dmg
+          path: dist/timon-macos-universal.dmg

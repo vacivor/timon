@@ -31,6 +31,15 @@ pub(crate) fn subscription(_app: &App) -> Subscription<Message> {
         time::every(Duration::from_millis(TICK_MS)).map(|_| Message::Tick),
         window::events().map(|(id, event)| Message::WindowEvent(id, event)),
         event::listen_with(|event, status, window| match (status, event) {
+            (_, iced::Event::Keyboard(key_event))
+                if matches!(
+                    &key_event,
+                    keyboard::Event::KeyPressed { key, modifiers, .. }
+                        if is_copy_shortcut(key, *modifiers) || is_paste_shortcut(key, *modifiers)
+                ) =>
+            {
+                Some(Message::KeyboardInput(window, key_event))
+            }
             (event::Status::Ignored, iced::Event::Keyboard(key_event)) => {
                 Some(Message::KeyboardInput(window, key_event))
             }
@@ -602,10 +611,7 @@ fn sidebar_footer<'a>() -> iced::widget::Container<'a, Message> {
             container(
                 text("TU")
                     .size(10)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Bold,
-                        ..iced::Font::DEFAULT
-                    })
+                    .font(ui_font_weight(iced::font::Weight::Bold))
                     .color(color_focus())
             )
             .width(Length::Fixed(28.0))
@@ -623,17 +629,11 @@ fn sidebar_footer<'a>() -> iced::widget::Container<'a, Message> {
             column![
                 text("Timon User")
                     .size(12)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::DEFAULT
-                    })
+                    .font(ui_font_weight(iced::font::Weight::Semibold))
                     .color(color_text_primary()),
                 text("ADMIN")
                     .size(10)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Bold,
-                        ..iced::Font::DEFAULT
-                    })
+                    .font(ui_font_weight(iced::font::Weight::Bold))
                     .color(color_text_muted()),
             ]
             .spacing(1),
@@ -683,14 +683,11 @@ fn settings_window_sidebar_item<'a>(
             manage_menu_icon(icon_menu, icon_color),
             text(label)
                 .size(13)
-                .font(iced::Font {
-                    weight: if active {
-                        iced::font::Weight::Bold
-                    } else {
-                        iced::font::Weight::Semibold
-                    },
-                    ..iced::Font::DEFAULT
-                })
+                .font(ui_font_weight(if active {
+                    iced::font::Weight::Bold
+                } else {
+                    iced::font::Weight::Semibold
+                }))
                 .color(if active {
                     color_focus()
                 } else {
@@ -729,10 +726,7 @@ fn settings_window_header<'a>() -> iced::widget::Container<'a, Message> {
         row![
             text("Settings")
                 .size(14)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..iced::Font::DEFAULT
-                })
+                .font(ui_font_weight(iced::font::Weight::Bold))
                 .color(color_text_primary()),
             Space::new().width(Length::Fill),
             settings_window_search_shell(),
@@ -762,10 +756,7 @@ fn settings_window_intro<'a>() -> iced::widget::Column<'a, Message> {
     column![
         text("Workspace Configuration")
             .size(22)
-            .font(iced::Font {
-                weight: iced::font::Weight::Bold,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Bold))
             .color(color_text_primary()),
         text("Manage terminal appearance, cursor behavior, and color credentials.")
             .size(14)
@@ -784,10 +775,7 @@ fn settings_window_section<'a>(
             manage_menu_icon(icon_menu, color_focus()),
             text(label)
                 .size(11)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..iced::Font::DEFAULT
-                })
+                .font(ui_font_weight(iced::font::Weight::Bold))
                 .color(color_text_secondary()),
         ]
         .spacing(8)
@@ -806,20 +794,14 @@ fn settings_window_row<'a>(
     let title_block: Element<'a, Message> = if description.is_empty() {
         text(title)
             .size(15)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Semibold))
             .color(color_text_primary())
             .into()
     } else {
         column![
             text(title)
                 .size(15)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::DEFAULT
-                })
+                .font(ui_font_weight(iced::font::Weight::Semibold))
                 .color(color_text_primary()),
             text(description).size(13).color(color_text_secondary()),
         ]
@@ -858,10 +840,7 @@ fn settings_window_input<'a>(
     column![
         text(label)
             .size(12)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Semibold))
             .color(color_text_secondary()),
         text_input(label, value)
             .on_input(on_input)
@@ -882,10 +861,7 @@ fn settings_window_pick_list<'a>(
     column![
         text(label)
             .size(12)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Semibold))
             .color(color_text_secondary()),
         pick_list(options, selected, on_select)
             .placeholder(placeholder)
@@ -909,10 +885,7 @@ fn settings_window_pick_list_owned<'a>(
     column![
         text(label)
             .size(12)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Semibold))
             .color(color_text_secondary()),
         pick_list(options, selected, on_select)
             .placeholder(placeholder)
@@ -971,10 +944,7 @@ fn settings_window_switch_field<'a>(
     column![
         text(label)
             .size(12)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Semibold))
             .color(color_text_secondary()),
         settings_window_switch(enabled, message),
     ]
@@ -988,10 +958,7 @@ fn settings_window_status_bar<'a>() -> iced::widget::Container<'a, Message> {
                 text("•").size(14).color(Color::from_rgb8(16, 185, 129)),
                 text("LOCAL CONFIG")
                     .size(11)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Bold,
-                        ..iced::Font::DEFAULT
-                    })
+                    .font(ui_font_weight(iced::font::Weight::Bold))
                     .color(Color::from_rgb8(16, 185, 129)),
                 text("TERMINAL PREFERENCES")
                     .size(11)
@@ -1144,14 +1111,11 @@ fn sidebar_item<'a>(
                 .size(SIDEBAR_MENU_FONT_SIZE_INACTIVE)
                 .line_height(iced::Pixels(SIDEBAR_MENU_FONT_SIZE_INACTIVE))
                 .align_y(Vertical::Center)
-                .font(iced::Font {
-                    weight: if active {
-                        iced::font::Weight::Bold
-                    } else {
-                        iced::font::Weight::Semibold
-                    },
-                    ..iced::Font::DEFAULT
-                })
+                .font(ui_font_weight(if active {
+                    iced::font::Weight::Bold
+                } else {
+                    iced::font::Weight::Semibold
+                }))
                 .color(mix_color(
                     Color::from_rgb8(71, 85, 105),
                     color_focus(),
@@ -1212,10 +1176,7 @@ fn menu_item<'a>(
     button(
         text(label)
             .size(13)
-            .font(iced::Font {
-                weight: iced::font::Weight::Medium,
-                ..iced::Font::DEFAULT
-            })
+            .font(ui_font_weight(iced::font::Weight::Medium))
             .color(if danger {
                 Color::from_rgb8(239, 68, 68)
             } else {
@@ -1424,6 +1385,7 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
             TerminalCanvasEvent::Scrolled { lines, point } => {
                 Message::TerminalScrolled(id, lines, point)
             }
+            TerminalCanvasEvent::Resized { cols, rows } => Message::TerminalResized(id, cols, rows),
         }),
     )
     .element();
@@ -1493,10 +1455,7 @@ fn connections_view(app: &App) -> Element<'_, Message> {
                 container(
                     text("CONNECT")
                         .size(11)
-                        .font(iced::Font {
-                            weight: iced::font::Weight::Bold,
-                            ..iced::Font::DEFAULT
-                        })
+                        .font(ui_font_weight(iced::font::Weight::Bold))
                         .color(Color::from_rgb8(156, 174, 184))
                 )
                 .padding([6, 11])
@@ -1534,7 +1493,7 @@ fn connections_view(app: &App) -> Element<'_, Message> {
                 .on_press(Message::NewConnection),
             button("▰  SERIAL")
                 .style(termius_action_button_style)
-                .on_press(Message::NewConnection),
+                .on_press(Message::NewSerialConnection),
             Space::new().width(Length::Fill),
             text("▦⌄  ◆⌄  A⌄")
                 .size(18)
@@ -1623,10 +1582,7 @@ fn connections_view(app: &App) -> Element<'_, Message> {
 fn termius_section_title<'a>(label: &'a str) -> Element<'a, Message> {
     text(label)
         .size(15)
-        .font(iced::Font {
-            weight: iced::font::Weight::Bold,
-            ..iced::Font::DEFAULT
-        })
+        .font(ui_font_weight(iced::font::Weight::Bold))
         .color(Color::from_rgb8(18, 25, 39))
         .into()
 }
@@ -1650,10 +1606,7 @@ fn termius_group_card(name: String, caption: String) -> Element<'static, Message
             column![
                 text(name)
                     .size(14)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::DEFAULT
-                    })
+                    .font(ui_font_weight(iced::font::Weight::Semibold))
                     .color(Color::from_rgb8(20, 28, 39)),
                 text(caption)
                     .size(12)
@@ -1671,27 +1624,26 @@ fn termius_group_card(name: String, caption: String) -> Element<'static, Message
     .into()
 }
 
-fn connection_avatar<'a>(
-    connection: &'a Connection,
+fn connection_avatar(
+    connection: &Connection,
     size: f32,
-) -> iced::widget::Container<'a, Message> {
+) -> iced::widget::Container<'static, Message> {
     let accent = match connection.connection_type {
         ConnectionType::Local => Color::from_rgb8(50, 211, 142),
         ConnectionType::Ssh => Color::from_rgb8(242, 78, 28),
+        ConnectionType::Serial => Color::from_rgb8(87, 106, 255),
     };
-    let initial = connection
-        .name
-        .chars()
-        .next()
-        .map(|ch| ch.to_ascii_uppercase().to_string())
-        .unwrap_or_else(|| "C".to_string());
 
-    container(text(initial).size(size * 0.42).color(Color::WHITE))
-        .width(Length::Fixed(size))
-        .height(Length::Fixed(size))
-        .center_x(Length::Shrink)
-        .center_y(Length::Shrink)
-        .style(move |_| bordered_surface(accent, 10.0, Color::TRANSPARENT, Shadow::default()))
+    container(connection_type_icon(
+        connection.connection_type,
+        Color::WHITE,
+        size * 0.46,
+    ))
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+    .center_x(Length::Shrink)
+    .center_y(Length::Shrink)
+    .style(move |_| bordered_surface(accent, 10.0, Color::TRANSPARENT, Shadow::default()))
 }
 
 fn connection_list_card<'a>(connection: &'a Connection) -> Element<'a, Message> {
@@ -1702,10 +1654,7 @@ fn connection_list_card<'a>(connection: &'a Connection) -> Element<'a, Message> 
                 column![
                     text(&connection.name)
                         .size(13)
-                        .font(iced::Font {
-                            weight: iced::font::Weight::Semibold,
-                            ..iced::Font::DEFAULT
-                        })
+                        .font(ui_font_weight(iced::font::Weight::Semibold))
                         .color(Color::from_rgb8(20, 28, 39)),
                     text(connection_termius_secondary_text(connection))
                         .size(12)
@@ -1725,14 +1674,27 @@ fn connection_list_card<'a>(connection: &'a Connection) -> Element<'a, Message> 
 }
 
 fn connection_termius_secondary_text(connection: &Connection) -> String {
-    if connection.connection_type == ConnectionType::Local {
-        "local".to_string()
-    } else if !connection.display_username.trim().is_empty() {
-        format!("ssh, {}", connection.display_username)
-    } else if !connection.username.trim().is_empty() {
-        format!("ssh, {}", connection.username)
-    } else {
-        "ssh".to_string()
+    match connection.connection_type {
+        ConnectionType::Local => "local".to_string(),
+        ConnectionType::Serial => {
+            if connection.serial_port.trim().is_empty() {
+                format!("serial, {}", connection.baud_rate)
+            } else {
+                format!(
+                    "serial, {} @ {}",
+                    connection.serial_port, connection.baud_rate
+                )
+            }
+        }
+        ConnectionType::Ssh => {
+            if !connection.display_username.trim().is_empty() {
+                format!("ssh, {}", connection.display_username)
+            } else if !connection.username.trim().is_empty() {
+                format!("ssh, {}", connection.username)
+            } else {
+                "ssh".to_string()
+            }
+        }
     }
 }
 
@@ -2210,7 +2172,7 @@ fn connection_drawer<'a>(
     app: &'a App,
     editor: &'a ConnectionEditor,
 ) -> iced::widget::Container<'a, Message> {
-    let type_options = vec!["ssh".to_string(), "local".to_string()];
+    let type_options = vec!["ssh".to_string(), "local".to_string(), "serial".to_string()];
     let group_option_pairs = std::iter::once(("None".to_string(), "None".to_string()))
         .chain(
             app.groups
@@ -2324,6 +2286,16 @@ fn connection_drawer<'a>(
         })
         .into(),
     ];
+    let serial_fields: Vec<Element<'a, Message>> = vec![
+        labeled_input("Serial Port", &editor.serial_port, |value| {
+            Message::ConnectionFieldChanged(ConnectionField::SerialPort, value)
+        })
+        .into(),
+        labeled_input("Baud Rate", &editor.baud_rate, |value| {
+            Message::ConnectionFieldChanged(ConnectionField::BaudRate, value)
+        })
+        .into(),
+    ];
 
     let mut content = column![
         labeled_input("Name", &editor.name, |value| {
@@ -2353,10 +2325,10 @@ fn connection_drawer<'a>(
     ]
     .spacing(10);
 
-    let section_fields = if editor.connection_type == ConnectionType::Local {
-        local_fields
-    } else {
-        ssh_fields
+    let section_fields = match editor.connection_type {
+        ConnectionType::Local => local_fields,
+        ConnectionType::Serial => serial_fields,
+        ConnectionType::Ssh => ssh_fields,
     };
 
     for field in section_fields {
@@ -2855,10 +2827,12 @@ fn terminal_tab_buttons<'a>(
                 "…"
             } else if tab.theme_id == "sftp" {
                 "S"
-            } else if tab.connection_type == ConnectionType::Local {
-                "L"
             } else {
-                "T"
+                match tab.connection_type {
+                    ConnectionType::Local => "L",
+                    ConnectionType::Serial => "R",
+                    ConnectionType::Ssh => "T",
+                }
             };
 
             row.push(

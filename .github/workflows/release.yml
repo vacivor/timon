@@ -22,7 +22,6 @@ jobs:
     runs-on: macos-14
     env:
       SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || vars.MACOS_SIGN_IDENTITY || '-' }}
-      PKG_SIGN_IDENTITY: ${{ secrets.MACOS_PKG_SIGN_IDENTITY || vars.MACOS_PKG_SIGN_IDENTITY || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,11 +29,11 @@ jobs:
           - target: aarch64-apple-darwin
             archive: timon-macos-aarch64
             make_app_target: package-macos-arm64-app
-            make_pkg_target: package-macos-arm64-pkg
+            make_dmg_target: package-macos-arm64-dmg
           - target: x86_64-apple-darwin
             archive: timon-macos-x86_64
             make_app_target: package-macos-x86_64-app
-            make_pkg_target: package-macos-x86_64-pkg
+            make_dmg_target: package-macos-x86_64-dmg
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,19 +64,18 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
           security find-identity -v "${KEYCHAIN_PATH}"
       - run: make ${{ matrix.make_app_target }}
-      - run: make ${{ matrix.make_pkg_target }}
+      - run: make ${{ matrix.make_dmg_target }}
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/${{ matrix.archive }}.app.zip
-            dist/${{ matrix.archive }}.pkg
+            dist/${{ matrix.archive }}.dmg
 
-  macos-universal-pkg:
-    name: macOS universal pkg release
+  macos-universal-dmg:
+    name: macOS universal dmg release
     runs-on: macos-14
     env:
       SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || vars.MACOS_SIGN_IDENTITY || '-' }}
-      PKG_SIGN_IDENTITY: ${{ secrets.MACOS_PKG_SIGN_IDENTITY || vars.MACOS_PKG_SIGN_IDENTITY || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -107,7 +105,9 @@ jobs:
           security list-keychains -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | sed 's/"//g')
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
           security find-identity -v "${KEYCHAIN_PATH}"
-      - run: make package-macos-universal-pkg
+      - run: make package-macos-universal-dmg
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/timon-macos-universal.pkg
+          files: |
+            dist/timon-macos-universal.app.zip
+            dist/timon-macos-universal.dmg

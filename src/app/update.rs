@@ -13,8 +13,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             app.settings_window = Some(id);
         }
         Message::Tick => {
-            let mut log_messages = Vec::new();
-
             for tab in &mut app.terminal_tabs {
                 while let Some(event) = tab.terminal.try_recv_event() {
                     match event {
@@ -29,43 +27,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                         }
                     }
                 }
-
-                let mut pending = Vec::new();
-                if let Some(rx) = &mut tab.event_rx {
-                    while let Ok(event) = rx.try_recv() {
-                        pending.push(event);
-                    }
-                }
-
-                for event in pending {
-                    match event {
-                        SessionEvent::Connected { description } => {
-                            tab.status = description.clone();
-                            log_messages.push(format!("{}: {}", tab.title, description));
-                        }
-                        SessionEvent::Output(bytes) => tab.terminal.feed(&bytes),
-                        SessionEvent::Status(status) => {
-                            tab.status = status.clone();
-                            log_messages.push(format!("{}: {}", tab.title, status));
-                        }
-                        SessionEvent::Error(error) => {
-                            tab.status = error.clone();
-                            tab.terminal.push_local_line(&format!("Error: {error}"));
-                            log_messages.push(format!("{}: {error}", tab.title));
-                        }
-                        SessionEvent::Disconnected(reason) => {
-                            tab.status = reason.clone();
-                            tab.terminal
-                                .push_local_line(&format!("Disconnected: {reason}"));
-                            tab.session = None;
-                            log_messages.push(format!("{}: {reason}", tab.title));
-                        }
-                    }
-                }
-            }
-
-            for log in log_messages {
-                app.log(log);
             }
 
             app.animate_titlebar_tabs();
@@ -88,6 +49,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 if Some(id) == app.main_window {
                     app.main_window_scale_factor = scale_factor.max(1.0);
                     app.glyph_atlas = Arc::new(Mutex::new(GlyphAtlas::new()));
+                    app.prewarm_terminal_glyphs();
                 }
             }
             window::Event::Closed => {
@@ -156,12 +118,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
 
                 if is_copy_shortcut(&key, modifiers) {
-                    if let Some(focused) = app.terminal_composer_focus {
-                        if app.active_tab == ActiveTab::Terminal(focused) {
-                            return Task::none();
-                        }
-                    }
-
                     if let Some(tab_id) = app.terminal_focus {
                         if let Some(tab) = app.terminal_tabs.iter().find(|tab| tab.id == tab_id) {
                             let snapshot =
@@ -173,6 +129,26 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                             }
                         }
                     }
+
+                    if let Some(focused) = app.terminal_composer_focus {
+                        if app.active_tab == ActiveTab::Terminal(focused) {
+                            return Task::none();
+                        }
+                    }
+
+                    return Task::none();
+                }
+
+                if is_paste_shortcut(&key, modifiers) {
+                    if let Some(tab_id) = app.terminal_focus {
+                        if app.terminal_composer_focus == Some(tab_id) {
+                            return Task::none();
+                        }
+
+                        return iced::clipboard::read()
+                            .map(move |content| Message::TerminalPaste(tab_id, content));
+                    }
+
                     return Task::none();
                 }
 
@@ -187,6 +163,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                             modifiers,
                             text.map(|value| value.to_string()),
                         ) {
+                            tab.terminal.scroll_to_bottom();
                             if let Some(session) = &tab.session {
                                 let _ = session.command_tx.send(SessionCommand::Input(bytes));
                             }
@@ -204,9 +181,13 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
 
                     if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         if let Some(session) = &tab.session {
-                            let _ = session
-                                .command_tx
-                                .send(SessionCommand::Input(content.into_bytes()));
+                            let bytes = if content.contains('\n') || content.contains('\r') {
+                                tab.terminal.encode_text_input(&content)
+                            } else {
+                                content.into_bytes()
+                            };
+                            tab.terminal.scroll_to_bottom();
+                            let _ = session.command_tx.send(SessionCommand::Input(bytes));
                         }
                     }
                 }
@@ -270,6 +251,32 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 tab.terminal.handle_scroll(lines, point);
             }
         }
+        Message::TerminalResized(id, cols, rows) => {
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                let cols = cols.max(2);
+                let rows = rows.max(2);
+                if tab.terminal.dimensions() != (cols, rows) {
+                    tab.terminal.resize(cols, rows);
+                    if let Some(session) = &tab.session {
+                        let _ = session.command_tx.send(SessionCommand::Resize {
+                            cols: cols as u16,
+                            rows: rows as u16,
+                        });
+                    }
+                }
+            }
+        }
+        Message::TerminalPaste(id, Some(content)) => {
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(session) = &tab.session {
+                    tab.terminal.scroll_to_bottom();
+                    let _ = session.command_tx.send(SessionCommand::Input(
+                        tab.terminal.encode_text_input(&content),
+                    ));
+                }
+            }
+        }
+        Message::TerminalPaste(_, None) => {}
         Message::TerminalComposerAction(id, action) => {
             if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
                 app.terminal_composer_focus = Some(id);
@@ -286,8 +293,9 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
 
                 if !payload.trim().is_empty() {
                     if let Some(session) = &tab.session {
-                        let mut bytes = payload.as_bytes().to_vec();
-                        bytes.push(b'\n');
+                        let mut bytes = tab.terminal.encode_text_input(payload);
+                        bytes.push(b'\r');
+                        tab.terminal.scroll_to_bottom();
                         let _ = session.command_tx.send(SessionCommand::Input(bytes));
                     }
                 }
@@ -373,6 +381,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             app.drawer = Some(DrawerState::Connection(ConnectionEditor::new()));
             app.context_menu = None;
         }
+        Message::NewSerialConnection => {
+            let mut editor = ConnectionEditor::new();
+            editor.name = "Serial".into();
+            editor.connection_type = ConnectionType::Serial;
+            editor.baud_rate = "115200".into();
+            app.drawer = Some(DrawerState::Connection(editor));
+            app.context_menu = None;
+        }
         Message::EditConnection(id) => {
             if let Some(connection) = app
                 .connections
@@ -407,15 +423,44 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                     }
                     ConnectionField::WorkDir => editor.work_dir = value,
                     ConnectionField::StartupCommand => editor.startup_command = value,
+                    ConnectionField::SerialPort => editor.serial_port = value,
+                    ConnectionField::BaudRate => editor.baud_rate = value,
                 }
             }
         }
         Message::ConnectionTypeChanged(value) => {
             if let Some(DrawerState::Connection(editor)) = &mut app.drawer {
                 editor.connection_type = ConnectionType::from(value.as_str());
-                if editor.connection_type != ConnectionType::Local {
-                    editor.shell_path.clear();
-                    editor.work_dir.clear();
+                match editor.connection_type {
+                    ConnectionType::Local => {
+                        editor.serial_port.clear();
+                        editor.baud_rate = "115200".into();
+                        if editor.port.trim().is_empty() {
+                            editor.port = "0".into();
+                        }
+                    }
+                    ConnectionType::Ssh => {
+                        editor.shell_path.clear();
+                        editor.work_dir.clear();
+                        editor.serial_port.clear();
+                        editor.baud_rate = "115200".into();
+                        if editor.port.trim() == "0" {
+                            editor.port = "22".into();
+                        }
+                    }
+                    ConnectionType::Serial => {
+                        editor.shell_path.clear();
+                        editor.work_dir.clear();
+                        editor.host.clear();
+                        editor.port = "0".into();
+                        editor.key_id = "None".into();
+                        editor.identity_id = "None".into();
+                        editor.username.clear();
+                        editor.password.clear();
+                        if editor.baud_rate.trim().is_empty() || editor.baud_rate.trim() == "0" {
+                            editor.baud_rate = "115200".into();
+                        }
+                    }
                 }
             }
         }
@@ -841,6 +886,41 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::TerminalSessionEvent(id, event) => {
+            let mut log_message = None;
+
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                match event {
+                    SessionEvent::Connected { description } => {
+                        tab.status = description.clone();
+                        log_message = Some(format!("{}: {}", tab.title, description));
+                    }
+                    SessionEvent::Output(bytes) => {
+                        tab.terminal.feed(&bytes);
+                    }
+                    SessionEvent::Status(status) => {
+                        tab.status = status.clone();
+                        log_message = Some(format!("{}: {}", tab.title, status));
+                    }
+                    SessionEvent::Error(error) => {
+                        tab.status = error.clone();
+                        tab.terminal.push_local_line(&format!("Error: {error}"));
+                        log_message = Some(format!("{}: {error}", tab.title));
+                    }
+                    SessionEvent::Disconnected(reason) => {
+                        tab.status = reason.clone();
+                        tab.terminal
+                            .push_local_line(&format!("Disconnected: {reason}"));
+                        tab.session = None;
+                        log_message = Some(format!("{}: {reason}", tab.title));
+                    }
+                }
+            }
+
+            if let Some(log_message) = log_message {
+                app.log(log_message);
+            }
+        }
         Message::SettingsFontChanged(field, value) => match field {
             FontField::Family => app.settings_editor.font_family = value,
             FontField::Size => app.settings_editor.font_size = value,
@@ -886,6 +966,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 Ok(()) => {
                     app.terminal_font = TerminalFont::from_settings(&app.settings.terminal.font);
                     app.glyph_atlas = Arc::new(Mutex::new(GlyphAtlas::new()));
+                    app.prewarm_terminal_glyphs();
                     let terminal_settings = app.settings.terminal.clone();
                     for tab in &mut app.terminal_tabs {
                         tab.terminal.reset(&terminal_settings);

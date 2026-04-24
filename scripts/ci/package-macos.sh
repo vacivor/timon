@@ -2,16 +2,15 @@
 set -euo pipefail
 
 APP_NAME="${APP_NAME:-Timon}"
-BINARY_NAME="${BINARY_NAME:-timon}"
+BINARY_NAME="${BINARY_NAME:-Timon}"
 BUNDLE_ID="${BUNDLE_ID:-io.vacivor.timon}"
 PROFILE="${PROFILE:-release}"
 DIST_DIR="${DIST_DIR:-dist}"
 TARGET_TRIPLE="${TARGET_TRIPLE:?TARGET_TRIPLE is required}"
 VERSION="${VERSION:-$(sed -n 's/^version = \"\\(.*\\)\"$/\\1/p' Cargo.toml | head -n 1)}"
 ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-timon-macos}"
-OUTPUTS="${OUTPUTS:-app,pkg}"
+OUTPUTS="${OUTPUTS:-app,dmg}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
-PKG_SIGN_IDENTITY="${PKG_SIGN_IDENTITY:-}"
 
 has_output() {
   case ",${OUTPUTS}," in
@@ -80,13 +79,20 @@ if has_output app; then
   ditto -c -k --sequesterRsrc --keepParent "${APP_DIR}" "${DIST_DIR}/${ARCHIVE_PREFIX}.app.zip"
 fi
 
-if has_output pkg; then
-  productbuild_args=()
+if has_output dmg; then
+  DMG_STAGING="${BUILD_ROOT}/dmg"
+  DMG_PATH="${DIST_DIR}/${ARCHIVE_PREFIX}.dmg"
 
-  if [[ -n "${PKG_SIGN_IDENTITY}" ]]; then
-    productbuild_args+=(--sign "${PKG_SIGN_IDENTITY}")
-  fi
+  rm -rf "${DMG_STAGING}"
+  mkdir -p "${DMG_STAGING}"
+  ditto "${APP_DIR}" "${DMG_STAGING}/${APP_NAME}.app"
+  ln -s /Applications "${DMG_STAGING}/Applications"
 
-  productbuild_args+=(--component "${APP_DIR}" "/Applications")
-  productbuild "${productbuild_args[@]}" "${DIST_DIR}/${ARCHIVE_PREFIX}.pkg"
+  rm -f "${DMG_PATH}"
+  hdiutil create \
+    -volname "${APP_NAME}" \
+    -srcfolder "${DMG_STAGING}" \
+    -ov \
+    -format UDZO \
+    "${DMG_PATH}"
 fi

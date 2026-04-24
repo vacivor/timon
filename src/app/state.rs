@@ -70,7 +70,6 @@ pub(crate) struct TerminalTab {
     pub(crate) selection_anchor: Option<TerminalPoint>,
     pub(crate) selection: Option<TerminalSelection>,
     pub(crate) session: Option<SessionHandle>,
-    pub(crate) event_rx: Option<tokio::sync::mpsc::UnboundedReceiver<SessionEvent>>,
 }
 
 pub(crate) enum TabWorkspace {
@@ -111,6 +110,8 @@ pub(crate) struct ConnectionEditor {
     pub(crate) shell_path: String,
     pub(crate) work_dir: String,
     pub(crate) startup_command: String,
+    pub(crate) serial_port: String,
+    pub(crate) baud_rate: String,
     pub(crate) connection_type: ConnectionType,
 }
 
@@ -188,6 +189,8 @@ pub(crate) enum ConnectionField {
     ShellPath,
     WorkDir,
     StartupCommand,
+    SerialPort,
+    BaudRate,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -268,6 +271,8 @@ pub(crate) enum Message {
     TerminalSelectionStarted(u64, TerminalPoint),
     TerminalSelectionUpdated(u64, TerminalPoint),
     TerminalScrolled(u64, i32, TerminalPoint),
+    TerminalResized(u64, usize, usize),
+    TerminalPaste(u64, Option<String>),
     TerminalComposerAction(u64, text_editor::Action),
     SubmitTerminalComposer(u64),
     OpenConnectionContext(i64),
@@ -276,6 +281,7 @@ pub(crate) enum Message {
     DuplicateConnection(i64),
     DeleteConnection(i64),
     NewConnection,
+    NewSerialConnection,
     EditConnection(i64),
     OpenSftpConnection(i64),
     SaveConnection,
@@ -312,6 +318,7 @@ pub(crate) enum Message {
     CloseDrawer,
     ConnectConnection(i64),
     TerminalConnected(u64, Result<SessionHandle, String>),
+    TerminalSessionEvent(u64, SessionEvent),
     SettingsFontChanged(FontField, String),
     SettingsScrollbackChanged(String),
     SettingsFontThickenChanged(bool),
@@ -342,7 +349,7 @@ impl App {
         let port_forwards = database.list_port_forwards().unwrap_or_default();
         let known_hosts = read_known_hosts(&paths.known_hosts).unwrap_or_default();
 
-        Self {
+        let app = Self {
             paths,
             database,
             settings,
@@ -377,7 +384,10 @@ impl App {
             known_hosts,
             logs: vec!["Timon 已启动".into()],
             settings_editor,
-        }
+        };
+
+        app.prewarm_terminal_glyphs();
+        app
     }
 
     pub(crate) fn log(&mut self, message: impl Into<String>) {
@@ -423,6 +433,14 @@ impl App {
                         })
                 }),
         }
+    }
+
+    pub(crate) fn prewarm_terminal_glyphs(&self) {
+        prewarm_glyph_atlas(
+            &self.glyph_atlas,
+            &self.terminal_font,
+            self.main_window_scale_factor,
+        );
     }
 
     pub(crate) fn animate_titlebar_tabs(&mut self) {
@@ -649,10 +667,9 @@ impl App {
             rows: rows as u16,
         };
 
-        let fallback_title = if connection.connection_type == ConnectionType::Local {
-            local_terminal_tab_title(&connection)
-        } else {
-            connection.name.clone()
+        let fallback_title = match connection.connection_type {
+            ConnectionType::Local => local_terminal_tab_title(&connection),
+            ConnectionType::Ssh | ConnectionType::Serial => connection.name.clone(),
         };
 
         self.terminal_tabs.push(TerminalTab {
@@ -669,16 +686,24 @@ impl App {
             selection_anchor: None,
             selection: None,
             session: None,
-            event_rx: Some(event_rx),
         });
         self.active_tab = ActiveTab::Terminal(terminal_id);
         self.terminal_focus = Some(terminal_id);
         self.context_menu = None;
         self.log(format!("开始连接 connection: {}", connection.name));
 
-        Task::perform(connect_target(target, event_tx), move |result| {
-            Message::TerminalConnected(terminal_id, result)
-        })
+        let event_stream = iced::futures::stream::unfold(event_rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        });
+
+        Task::batch([
+            Task::perform(connect_target(target, event_tx), move |result| {
+                Message::TerminalConnected(terminal_id, result)
+            }),
+            Task::run(event_stream, move |event| {
+                Message::TerminalSessionEvent(terminal_id, event)
+            }),
+        ])
     }
 
     pub(crate) fn open_sftp_from_connection(&mut self, connection_id: i64) -> Task<Message> {
@@ -728,7 +753,6 @@ impl App {
             selection_anchor: None,
             selection: None,
             session: None,
-            event_rx: None,
         });
         self.active_tab = ActiveTab::Terminal(terminal_id);
         self.terminal_focus = Some(terminal_id);
@@ -841,6 +865,8 @@ impl ConnectionEditor {
             shell_path: connection.shell_path.clone(),
             work_dir: connection.work_dir.clone(),
             startup_command: connection.startup_command.clone(),
+            serial_port: connection.serial_port.clone(),
+            baud_rate: connection.baud_rate.to_string(),
             connection_type: connection.connection_type,
         }
     }
@@ -851,18 +877,39 @@ impl ConnectionEditor {
 
     pub(crate) fn to_connection(&self) -> Result<Connection, String> {
         let connection_type = self.connection_type;
-        let host = self.host.trim().to_string();
-        let port = if connection_type == ConnectionType::Local {
-            0
+        let host = if connection_type == ConnectionType::Ssh {
+            self.host.trim().to_string()
         } else {
+            String::new()
+        };
+        let port = if connection_type == ConnectionType::Ssh {
             self.port
                 .trim()
                 .parse::<i64>()
                 .map_err(|_| "端口必须是数字".to_string())?
+        } else {
+            0
+        };
+        let serial_port = if connection_type == ConnectionType::Serial {
+            self.serial_port.trim().to_string()
+        } else {
+            String::new()
+        };
+        let baud_rate = if connection_type == ConnectionType::Serial {
+            self.baud_rate
+                .trim()
+                .parse::<i64>()
+                .map_err(|_| "波特率必须是数字".to_string())?
+        } else {
+            115200
         };
 
         if self.name.trim().is_empty() {
             return Err("Connection 名称不能为空".into());
+        }
+
+        if connection_type == ConnectionType::Serial && serial_port.is_empty() {
+            return Err("Serial 设备路径不能为空".into());
         }
 
         let shell_path = if connection_type == ConnectionType::Local {
@@ -880,14 +927,38 @@ impl ConnectionEditor {
             id: self.id.unwrap_or(0),
             name: self.name.trim().to_string(),
             group_id: parse_optional_i64(&self.group_id),
-            key_id: parse_optional_i64(&self.key_id),
-            effective_key_id: parse_optional_i64(&self.key_id),
-            identity_id: parse_optional_i64(&self.identity_id),
+            key_id: if connection_type == ConnectionType::Ssh {
+                parse_optional_i64(&self.key_id)
+            } else {
+                None
+            },
+            effective_key_id: if connection_type == ConnectionType::Ssh {
+                parse_optional_i64(&self.key_id)
+            } else {
+                None
+            },
+            identity_id: if connection_type == ConnectionType::Ssh {
+                parse_optional_i64(&self.identity_id)
+            } else {
+                None
+            },
             host,
             port,
-            username: self.username.clone(),
-            display_username: self.username.clone(),
-            password: self.password.clone(),
+            username: if connection_type == ConnectionType::Ssh {
+                self.username.clone()
+            } else {
+                String::new()
+            },
+            display_username: if connection_type == ConnectionType::Ssh {
+                self.username.clone()
+            } else {
+                String::new()
+            },
+            password: if connection_type == ConnectionType::Ssh {
+                self.password.clone()
+            } else {
+                String::new()
+            },
             theme_id: if self.theme_id.trim().is_empty() {
                 "default".into()
             } else {
@@ -896,6 +967,8 @@ impl ConnectionEditor {
             shell_path,
             work_dir,
             startup_command: self.startup_command.clone(),
+            serial_port,
+            baud_rate,
             connection_type,
         })
     }

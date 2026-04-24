@@ -135,6 +135,7 @@ pub enum TerminalCanvasEvent {
     SelectionStarted(TerminalPoint),
     SelectionUpdated(TerminalPoint),
     Scrolled { lines: i32, point: TerminalPoint },
+    Resized { cols: usize, rows: usize },
 }
 
 pub struct TerminalAtlasState {
@@ -143,6 +144,7 @@ pub struct TerminalAtlasState {
     cursor_visible: bool,
     cursor_blink_started_at: Instant,
     last_cursor_key: Option<CursorBlinkKey>,
+    last_terminal_size: Option<(usize, usize)>,
 }
 
 impl Default for TerminalAtlasState {
@@ -153,6 +155,7 @@ impl Default for TerminalAtlasState {
             cursor_visible: true,
             cursor_blink_started_at: Instant::now(),
             last_cursor_key: None,
+            last_terminal_size: None,
         }
     }
 }
@@ -350,6 +353,14 @@ impl TerminalView {
         self.event_rx.try_recv().ok()
     }
 
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    pub fn dimensions(&self) -> (usize, usize) {
+        (self.cols, self.rows)
+    }
+
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.cols = cols.max(2);
         self.rows = rows.max(2);
@@ -433,6 +444,19 @@ impl TerminalView {
             Key::Named(key::Named::F11) => Some(b"\x1b[23~".to_vec()),
             Key::Named(key::Named::F12) => Some(b"\x1b[24~".to_vec()),
             _ => None,
+        }
+    }
+
+    pub fn encode_text_input(&self, content: &str) -> Vec<u8> {
+        let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+
+        if normalized.contains('\n') && self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+            let mut bytes = b"\x1b[200~".to_vec();
+            bytes.extend_from_slice(normalized.as_bytes());
+            bytes.extend_from_slice(b"\x1b[201~");
+            bytes
+        } else {
+            normalized.replace('\n', "\r").into_bytes()
         }
     }
 
@@ -563,6 +587,13 @@ impl<Message: 'static> TerminalAtlas<Message> {
         self.point_at(bounds, clamped)
             .unwrap_or(TerminalPoint { line: 0, column: 0 })
     }
+
+    fn size_for_bounds(&self, bounds: Rectangle) -> (usize, usize) {
+        let cols = (bounds.width / self.font.metrics.cell_width.max(1.0)).floor() as usize;
+        let rows = (bounds.height / self.font.metrics.cell_height.max(1.0)).floor() as usize;
+
+        (cols.max(2), rows.max(2))
+    }
 }
 
 impl<Message, Theme, RendererType> Widget<Message, Theme, RendererType> for TerminalAtlas<Message>
@@ -607,13 +638,20 @@ where
         let state = tree.state.downcast_mut::<TerminalAtlasState>();
 
         match event {
-            IcedEvent::Window(iced::window::Event::RedrawRequested(_)) if self.focused => {
-                let now =
-                    if let IcedEvent::Window(iced::window::Event::RedrawRequested(now)) = event {
-                        *now
-                    } else {
-                        Instant::now()
-                    };
+            IcedEvent::Window(iced::window::Event::RedrawRequested(now)) => {
+                let terminal_size = self.size_for_bounds(bounds);
+                if state.last_terminal_size != Some(terminal_size) {
+                    state.last_terminal_size = Some(terminal_size);
+                    shell.publish((self.on_event)(TerminalCanvasEvent::Resized {
+                        cols: terminal_size.0,
+                        rows: terminal_size.1,
+                    }));
+                }
+
+                if !self.focused {
+                    return;
+                }
+
                 let cursor_key = CursorBlinkKey {
                     line: self.snapshot.cursor_line,
                     column: self.snapshot.cursor_column,
@@ -626,7 +664,7 @@ where
                 if state.last_cursor_key != Some(cursor_key) {
                     state.last_cursor_key = Some(cursor_key);
                     state.cursor_visible = true;
-                    state.cursor_blink_started_at = now;
+                    state.cursor_blink_started_at = *now;
                 }
                 if self.snapshot.show_cursor && self.snapshot.cursor_blinking {
                     let elapsed = now.saturating_duration_since(state.cursor_blink_started_at);
@@ -634,8 +672,9 @@ where
                     state.cursor_visible = phase == 0;
                     let millis_until_redraw = CURSOR_BLINK_INTERVAL.as_millis()
                         - elapsed.as_millis() % CURSOR_BLINK_INTERVAL.as_millis();
-                    shell
-                        .request_redraw_at(now + Duration::from_millis(millis_until_redraw as u64));
+                    shell.request_redraw_at(
+                        *now + Duration::from_millis(millis_until_redraw as u64),
+                    );
                 } else {
                     state.cursor_visible = true;
                 }
@@ -1134,95 +1173,89 @@ impl TerminalAtlasPipeline {
             color: color_to_f32(primitive.snapshot.background),
         });
 
-        for cell in &primitive.snapshot.cells {
-            let selected = selection_contains(primitive.selection.as_ref(), cell);
-            let cursor_on_cell = cursor_covers_cell(&primitive.snapshot, cell);
-            let rect = physical_cell_rect(
-                cell.column,
-                cell.line,
-                cell.width.max(1),
-                primitive.font.metrics.cell_width,
-                primitive.font.metrics.cell_height,
-                primitive.scale_factor,
-            );
-
-            let background = if cursor_on_cell
-                && primitive.snapshot.show_cursor
-                && matches!(primitive.snapshot.cursor_shape, CursorShape::Block)
-            {
-                primitive.snapshot.cursor_color
-            } else if selected {
-                primitive.snapshot.selection_background
-            } else {
-                cell.bg
-            };
-
-            if background != primitive.snapshot.background {
-                push_rect_instance(
-                    &mut rects,
-                    rect.0 as f32,
-                    rect.1 as f32,
-                    (rect.2 - rect.0) as f32,
-                    (rect.3 - rect.1) as f32,
-                    background,
+        if let Ok(mut atlas) = primitive.atlas.lock() {
+            for cell in &primitive.snapshot.cells {
+                let selected = selection_contains(primitive.selection.as_ref(), cell);
+                let cursor_on_cell = cursor_covers_cell(&primitive.snapshot, cell);
+                let rect = physical_cell_rect(
+                    cell.column,
+                    cell.line,
+                    cell.width.max(1),
+                    primitive.font.metrics.cell_width,
+                    primitive.font.metrics.cell_height,
+                    primitive.scale_factor,
                 );
-            }
 
-            if let Some(underline) = cell.underline {
-                append_underline_rects(
-                    &mut rects,
-                    underline,
-                    rect.0 as f32,
-                    rect.1 as f32,
-                    (rect.2 - rect.0) as f32,
-                    (rect.3 - rect.1) as f32,
-                    cell.underline_color,
-                );
-            }
-
-            let Some(glyph) = rasterized_glyph_for_cell(
-                &primitive.atlas,
-                &primitive.font,
-                primitive.scale_factor,
-                cell,
-            ) else {
-                continue;
-            };
-
-            let Ok(atlas) = primitive.atlas.lock() else {
-                continue;
-            };
-            let Some(page) = atlas.page(glyph.page_index) else {
-                continue;
-            };
-            prepared_glyphs.push(PreparedGlyph {
-                x: (rect.0 + glyph.offset_x) as f32,
-                y: (rect.1 + glyph.offset_y) as f32,
-                width: glyph.width as f32,
-                height: glyph.height as f32,
-                page_index: glyph.page_index,
-                atlas_x: glyph.atlas_x,
-                atlas_y: glyph.atlas_y,
-                atlas_width: page.width,
-                atlas_height: page.height,
-                color: if cursor_on_cell
+                let background = if cursor_on_cell
                     && primitive.snapshot.show_cursor
                     && matches!(primitive.snapshot.cursor_shape, CursorShape::Block)
                 {
-                    primitive.snapshot.cursor_text
+                    primitive.snapshot.cursor_color
                 } else if selected {
-                    primitive.snapshot.selection_foreground
+                    primitive.snapshot.selection_background
                 } else {
-                    cell.fg
-                },
-            });
-        }
+                    cell.bg
+                };
 
-        let mut glyph_instances = Vec::with_capacity(prepared_glyphs.len());
-        if let Ok(atlas) = primitive.atlas.lock() {
+                if background != primitive.snapshot.background {
+                    push_rect_instance(
+                        &mut rects,
+                        rect.0 as f32,
+                        rect.1 as f32,
+                        (rect.2 - rect.0) as f32,
+                        (rect.3 - rect.1) as f32,
+                        background,
+                    );
+                }
+
+                if let Some(underline) = cell.underline {
+                    append_underline_rects(
+                        &mut rects,
+                        underline,
+                        rect.0 as f32,
+                        rect.1 as f32,
+                        (rect.2 - rect.0) as f32,
+                        (rect.3 - rect.1) as f32,
+                        cell.underline_color,
+                    );
+                }
+
+                let Some((glyph, atlas_width, atlas_height)) = rasterized_glyph_for_cell_in_atlas(
+                    &mut atlas,
+                    &primitive.font,
+                    primitive.scale_factor,
+                    cell,
+                ) else {
+                    continue;
+                };
+
+                prepared_glyphs.push(PreparedGlyph {
+                    x: (rect.0 + glyph.offset_x) as f32,
+                    y: (rect.1 + glyph.offset_y) as f32,
+                    width: glyph.width as f32,
+                    height: glyph.height as f32,
+                    page_index: glyph.page_index,
+                    atlas_x: glyph.atlas_x,
+                    atlas_y: glyph.atlas_y,
+                    atlas_width,
+                    atlas_height,
+                    color: if cursor_on_cell
+                        && primitive.snapshot.show_cursor
+                        && matches!(primitive.snapshot.cursor_shape, CursorShape::Block)
+                    {
+                        primitive.snapshot.cursor_text
+                    } else if selected {
+                        primitive.snapshot.selection_foreground
+                    } else {
+                        cell.fg
+                    },
+                });
+            }
+
             self.sync_atlas_texture(device, queue, &atlas);
         }
 
+        let mut glyph_instances = Vec::with_capacity(prepared_glyphs.len());
         for glyph in prepared_glyphs {
             glyph_instances.push(GlyphInstance {
                 rect: [glyph.x, glyph.y, glyph.width, glyph.height],
@@ -1421,6 +1454,38 @@ impl TerminalFont {
     }
 }
 
+const PREWARM_ASCII_GLYPHS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`-=[]\\\\;',./~!@#$%^&*()_+{}|:\\\"<>?";
+const PREWARM_EXTRA_GLYPHS: &[&str] = &[
+    "~", "│", "─", "└", "┘", "┌", "┐", "├", "┤", "┬", "┴", "┼", "╭", "╮", "╯", "╰", "·", "•",
+];
+
+pub fn prewarm_glyph_atlas(atlas: &Arc<Mutex<GlyphAtlas>>, font: &TerminalFont, scale_factor: f32) {
+    let seed_cell = |text: String, bold: bool| TerminalCell {
+        text,
+        fg: Color::BLACK,
+        bg: Color::TRANSPARENT,
+        underline: None,
+        underline_color: Color::BLACK,
+        width: 1,
+        bold,
+        italic: false,
+        dim: false,
+        hidden: false,
+        line: 0,
+        column: 0,
+    };
+
+    for glyph in PREWARM_ASCII_GLYPHS.chars().map(|ch| ch.to_string()).chain(
+        PREWARM_EXTRA_GLYPHS
+            .iter()
+            .map(|glyph| (*glyph).to_string()),
+    ) {
+        let _ =
+            rasterized_glyph_for_cell(atlas, font, scale_factor, &seed_cell(glyph.clone(), false));
+        let _ = rasterized_glyph_for_cell(atlas, font, scale_factor, &seed_cell(glyph, true));
+    }
+}
+
 impl GlyphAtlas {
     pub fn new() -> Self {
         Self {
@@ -1614,6 +1679,8 @@ fn snapshot_from_renderable(
 
     let cursor_line = renderable.cursor.point.line.0.max(0) as usize;
     let cursor_column = renderable.cursor.point.column.0;
+    let show_cursor =
+        renderable.display_offset == 0 && renderable.cursor.shape != CursorShape::Hidden;
     let cursor_width = cells
         .iter()
         .find(|cell| {
@@ -1630,7 +1697,7 @@ fn snapshot_from_renderable(
         cursor_column: cursor_column.min(cols.saturating_sub(1)),
         cursor_width,
         cursor_shape: renderable.cursor.shape,
-        show_cursor: renderable.cursor.shape != CursorShape::Hidden,
+        show_cursor,
         cursor_blinking,
         background: theme.background,
         cursor_color: theme.cursor_color,
@@ -1797,18 +1864,31 @@ fn rasterized_glyph_for_cell(
     scale_factor: f32,
     cell: &TerminalCell,
 ) -> Option<RasterizedGlyph> {
+    let mut atlas = atlas.lock().ok()?;
+    rasterized_glyph_for_cell_in_atlas(&mut atlas, font, scale_factor, cell)
+        .map(|(glyph, _, _)| glyph)
+}
+
+fn rasterized_glyph_for_cell_in_atlas(
+    atlas: &mut GlyphAtlas,
+    font: &TerminalFont,
+    scale_factor: f32,
+    cell: &TerminalCell,
+) -> Option<(RasterizedGlyph, u32, u32)> {
     let key = glyph_key_for_cell(font, scale_factor, cell)?;
 
-    let mut atlas = atlas.lock().ok()?;
-
     if let Some(glyph) = atlas.glyphs.get(&key) {
-        return Some(glyph.clone());
+        let glyph = glyph.clone();
+        let page = atlas.page(glyph.page_index)?;
+        return Some((glyph, page.width, page.height));
     }
 
     let (width, height, offset_x, offset_y, pixels) =
         rasterize_glyph(font, scale_factor, &key, &mut atlas.swash_cache)?;
 
-    atlas.insert_mask(key, width, height, offset_x, offset_y, pixels)
+    let glyph = atlas.insert_mask(key, width, height, offset_x, offset_y, pixels)?;
+    let page = atlas.page(glyph.page_index)?;
+    Some((glyph, page.width, page.height))
 }
 
 fn glyph_key_for_cell(
@@ -2555,6 +2635,20 @@ mod tests {
 
         assert_eq!(snapshot_line_text(&snapshot, 0), "1111");
         assert_eq!(snapshot_line_text(&snapshot, 1), "2222");
+    }
+
+    #[test]
+    fn viewport_scrolls_when_output_reaches_bottom() {
+        let settings = TerminalSettings::default();
+        let theme = TerminalTheme::from_settings(&settings.colors);
+        let mut terminal = TerminalView::new(4, 2, &settings);
+
+        terminal.feed(b"1111\r\n2222\r\n3333");
+
+        let snapshot = terminal.snapshot(&theme);
+
+        assert_eq!(snapshot_line_text(&snapshot, 0), "2222");
+        assert_eq!(snapshot_line_text(&snapshot, 1), "3333");
     }
 
     #[test]

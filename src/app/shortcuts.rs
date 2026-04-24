@@ -5,6 +5,11 @@ pub(crate) fn is_copy_shortcut(key: &Key, modifiers: keyboard::Modifiers) -> boo
         && (modifiers.command() || (modifiers.control() && modifiers.shift()))
 }
 
+pub(crate) fn is_paste_shortcut(key: &Key, modifiers: keyboard::Modifiers) -> bool {
+    matches!(key.as_ref(), Key::Character("v") | Key::Character("V"))
+        && (modifiers.command() || (modifiers.control() && modifiers.shift()))
+}
+
 pub(crate) fn is_close_tab_shortcut(
     shortcuts: &ShortcutSettings,
     key: &Key,

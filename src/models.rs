@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub enum ConnectionType {
     Ssh,
     Local,
+    Serial,
 }
 
 impl ConnectionType {
@@ -11,6 +12,7 @@ impl ConnectionType {
         match self {
             Self::Ssh => "ssh",
             Self::Local => "local",
+            Self::Serial => "serial",
         }
     }
 }
@@ -25,6 +27,7 @@ impl From<&str> for ConnectionType {
     fn from(value: &str) -> Self {
         match value {
             "local" => Self::Local,
+            "serial" => Self::Serial,
             _ => Self::Ssh,
         }
     }
@@ -47,6 +50,8 @@ pub struct Connection {
     pub shell_path: String,
     pub work_dir: String,
     pub startup_command: String,
+    pub serial_port: String,
+    pub baud_rate: i64,
     pub connection_type: ConnectionType,
 }
 
@@ -68,6 +73,8 @@ impl Default for Connection {
             shell_path: String::new(),
             work_dir: String::new(),
             startup_command: String::new(),
+            serial_port: String::new(),
+            baud_rate: 115200,
             connection_type: ConnectionType::Ssh,
         }
     }

@@ -410,10 +410,7 @@ pub fn load_custom_terminal_themes(dir: &Path) -> Vec<TerminalThemeEntry> {
     themes
 }
 
-fn parse_builtin_theme(
-    source: &str,
-    fallback: impl FnOnce() -> TerminalColors,
-) -> TerminalColors {
+fn parse_builtin_theme(source: &str, fallback: impl FnOnce() -> TerminalColors) -> TerminalColors {
     toml::from_str::<ThemeFile>(source)
         .map(|file| file.colors)
         .unwrap_or_else(|_| fallback())
@@ -765,6 +762,21 @@ impl Database {
                 ],
             )?;
         }
+
+        Ok(())
+    }
+
+    pub fn delete_connection(&self, connection_id: i64) -> Result<()> {
+        let connection = self.open()?;
+
+        connection.execute(
+            "DELETE FROM port_forwards WHERE connection_id = ?1",
+            params![connection_id],
+        )?;
+        connection.execute(
+            "DELETE FROM connections WHERE id = ?1",
+            params![connection_id],
+        )?;
 
         Ok(())
     }

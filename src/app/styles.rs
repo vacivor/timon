@@ -2,19 +2,15 @@ use super::*;
 use crate::terminal::TerminalTheme;
 
 pub(crate) fn color_canvas() -> Color {
-    Color::from_rgb8(250, 250, 250)
+    Color::from_rgb8(246, 247, 249)
 }
 
 pub(crate) fn color_surface_subtle() -> Color {
-    Color::from_rgb8(245, 245, 246)
-}
-
-pub(crate) fn color_surface_soft() -> Color {
-    Color::from_rgb8(240, 240, 242)
+    Color::from_rgb8(250, 250, 250)
 }
 
 pub(crate) fn color_surface_elevated() -> Color {
-    Color::from_rgb8(248, 249, 250)
+    Color::from_rgb8(255, 255, 255)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -28,53 +24,45 @@ pub(crate) fn color_glass_edge() -> Color {
 }
 
 pub(crate) fn color_text_primary() -> Color {
-    Color::from_rgb8(23, 23, 23)
+    Color::from_rgb8(18, 24, 38)
 }
 
 pub(crate) fn color_text_secondary() -> Color {
-    Color::from_rgb8(77, 77, 77)
+    Color::from_rgb8(107, 114, 128)
 }
 
 pub(crate) fn color_text_muted() -> Color {
-    Color::from_rgb8(102, 102, 102)
+    Color::from_rgb8(148, 163, 184)
 }
 
 pub(crate) fn color_text_faint() -> Color {
-    Color::from_rgb8(128, 128, 128)
+    Color::from_rgb8(156, 163, 175)
 }
 
 pub(crate) fn manage_glass_text_primary() -> Color {
-    Color::from_rgb8(23, 23, 23)
+    Color::from_rgb8(240, 244, 252)
 }
 
 pub(crate) fn manage_glass_text_secondary() -> Color {
-    Color::from_rgb8(77, 77, 77)
+    Color::from_rgb8(159, 172, 196)
 }
 
 pub(crate) fn color_ring_subtle() -> Color {
-    Color::from_rgba8(0, 0, 0, 0.08)
+    Color::from_rgba8(15, 23, 42, 0.06)
 }
 
 pub(crate) fn color_ring_soft() -> Color {
-    Color::from_rgb8(235, 235, 235)
+    Color::from_rgb8(229, 231, 235)
 }
 
 pub(crate) fn color_focus() -> Color {
     Color::from_rgb8(10, 114, 239)
 }
 
-pub(crate) fn card_shadow() -> Shadow {
-    Shadow {
-        color: Color::from_rgba8(0, 0, 0, 0.06),
-        offset: Vector::new(0.0, 6.0),
-        blur_radius: 18.0,
-    }
-}
-
 pub(crate) fn shallow_shadow() -> Shadow {
     Shadow {
-        color: Color::from_rgba8(0, 0, 0, 0.04),
-        offset: Vector::new(0.0, 2.0),
+        color: Color::from_rgba8(15, 23, 42, 0.025),
+        offset: Vector::new(0.0, 1.0),
         blur_radius: 8.0,
     }
 }
@@ -98,7 +86,7 @@ pub(crate) fn bordered_surface(
     }
 }
 
-fn mix_color(a: Color, b: Color, t: f32) -> Color {
+pub(crate) fn mix_color(a: Color, b: Color, t: f32) -> Color {
     let clamped = t.clamp(0.0, 1.0);
 
     Color {
@@ -109,7 +97,7 @@ fn mix_color(a: Color, b: Color, t: f32) -> Color {
     }
 }
 
-fn with_alpha(color: Color, alpha: f32) -> Color {
+pub(crate) fn with_alpha(color: Color, alpha: f32) -> Color {
     Color { a: alpha, ..color }
 }
 
@@ -160,39 +148,22 @@ pub(crate) fn terminal_topbar_style(theme: &TerminalTheme) -> container::Style {
 }
 
 pub(crate) fn manage_shell_style() -> container::Style {
-    #[cfg(target_os = "macos")]
-    {
-        bordered_surface(
-            Color::from_rgba8(250, 250, 250, 0.18),
-            14.0,
-            Color::from_rgba8(255, 255, 255, 0.18),
-            Shadow {
-                color: Color::from_rgba8(0, 0, 0, 0.08),
-                offset: Vector::new(0.0, 10.0),
-                blur_radius: 28.0,
-            },
-        )
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        bordered_surface(
-            color_glass_fill(),
-            14.0,
-            color_glass_edge(),
-            Shadow {
-                color: Color::from_rgba8(148, 163, 184, 0.18),
-                offset: Vector::new(0.0, 12.0),
-                blur_radius: 96.0,
-            },
-        )
-    }
+    bordered_surface(
+        Color::from_rgb8(236, 242, 244),
+        14.0,
+        Color::from_rgba8(15, 23, 42, 0.07),
+        Shadow {
+            color: Color::from_rgba8(15, 23, 42, 0.045),
+            offset: Vector::new(0.0, 10.0),
+            blur_radius: 24.0,
+        },
+    )
 }
 
 pub(crate) fn manage_topbar_style() -> container::Style {
     container::Style {
-        text_color: Some(color_text_primary()),
-        background: Some(Background::Color(Color::TRANSPARENT)),
+        text_color: Some(manage_glass_text_primary()),
+        background: Some(Background::Color(Color::from_rgb8(63, 68, 89))),
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
@@ -206,7 +177,21 @@ pub(crate) fn manage_topbar_style() -> container::Style {
 pub(crate) fn manage_sidebar_style() -> container::Style {
     container::Style {
         text_color: Some(color_text_primary()),
-        background: Some(Background::Color(Color::TRANSPARENT)),
+        background: Some(Background::Color(Color::from_rgb8(250, 250, 250))),
+        border: Border {
+            color: Color::from_rgb8(229, 231, 235),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn manage_content_surface_style() -> container::Style {
+    container::Style {
+        text_color: Some(color_text_primary()),
+        background: Some(Background::Color(Color::from_rgb8(255, 255, 255))),
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
@@ -217,55 +202,26 @@ pub(crate) fn manage_sidebar_style() -> container::Style {
     }
 }
 
-pub(crate) fn manage_content_surface_style() -> container::Style {
-    bordered_surface(
-        Color::from_rgb8(252, 252, 253),
-        18.0,
-        Color::from_rgba8(255, 255, 255, 0.9),
-        Shadow {
-            color: Color::from_rgba8(0, 0, 0, 0.05),
-            offset: Vector::new(0.0, 10.0),
-            blur_radius: 24.0,
-        },
-    )
-}
-
 pub(crate) fn drawer_surface_style() -> container::Style {
     bordered_surface(color_canvas(), 0.0, color_ring_subtle(), shallow_shadow())
 }
 
 pub(crate) fn card_surface_style() -> container::Style {
-    bordered_surface(color_canvas(), 10.0, color_ring_subtle(), card_shadow())
+    bordered_surface(
+        color_surface_elevated(),
+        14.0,
+        color_ring_soft(),
+        shallow_shadow(),
+    )
 }
 
 pub(crate) fn section_surface_style() -> container::Style {
-    bordered_surface(color_canvas(), 10.0, color_ring_soft(), shallow_shadow())
-}
-
-pub(crate) fn capsule_surface_style() -> container::Style {
-    bordered_surface(color_canvas(), 22.0, color_ring_soft(), shallow_shadow())
-}
-
-pub(crate) fn status_badge_style() -> container::Style {
     bordered_surface(
-        Color::from_rgb8(235, 245, 255),
-        999.0,
-        Color::from_rgb8(214, 232, 255),
-        Shadow::default(),
-    )
-}
-
-pub(crate) fn neutral_badge_style() -> container::Style {
-    bordered_surface(
-        color_surface_subtle(),
-        999.0,
+        color_surface_elevated(),
+        14.0,
         color_ring_soft(),
-        Shadow::default(),
+        shallow_shadow(),
     )
-}
-
-pub(crate) fn context_menu_style() -> container::Style {
-    bordered_surface(color_canvas(), 12.0, color_ring_soft(), card_shadow())
 }
 
 pub(crate) fn button_style_base(
@@ -290,13 +246,13 @@ pub(crate) fn button_style_base(
 pub(crate) fn light_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     match status {
         button::Status::Hovered => button_style_base(
-            color_surface_soft(),
+            Color::from_rgb8(248, 250, 252),
             color_text_primary(),
             color_ring_soft(),
-            shallow_shadow(),
+            Shadow::default(),
         ),
         button::Status::Pressed => button_style_base(
-            Color::from_rgb8(240, 240, 240),
+            Color::from_rgb8(241, 245, 249),
             color_text_primary(),
             color_ring_soft(),
             Shadow::default(),
@@ -308,7 +264,7 @@ pub(crate) fn light_button_style(_theme: &Theme, status: button::Status) -> butt
             Shadow::default(),
         ),
         _ => button_style_base(
-            color_canvas(),
+            Color::from_rgb8(255, 255, 255),
             color_text_primary(),
             color_ring_soft(),
             Shadow::default(),
@@ -319,15 +275,15 @@ pub(crate) fn light_button_style(_theme: &Theme, status: button::Status) -> butt
 pub(crate) fn dark_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     match status {
         button::Status::Hovered => button_style_base(
-            Color::from_rgb8(38, 38, 38),
+            Color::from_rgb8(34, 86, 244),
             color_canvas(),
-            Color::from_rgb8(38, 38, 38),
-            shallow_shadow(),
+            Color::from_rgb8(34, 86, 244),
+            Shadow::default(),
         ),
         button::Status::Pressed => button_style_base(
-            Color::from_rgb8(58, 58, 58),
+            Color::from_rgb8(26, 74, 222),
             color_canvas(),
-            Color::from_rgb8(58, 58, 58),
+            Color::from_rgb8(26, 74, 222),
             Shadow::default(),
         ),
         button::Status::Disabled => button_style_base(
@@ -337,10 +293,10 @@ pub(crate) fn dark_button_style(_theme: &Theme, status: button::Status) -> butto
             Shadow::default(),
         ),
         _ => button_style_base(
-            color_text_primary(),
+            Color::from_rgb8(37, 99, 235),
             color_canvas(),
-            color_text_primary(),
-            shallow_shadow(),
+            Color::from_rgb8(37, 99, 235),
+            Shadow::default(),
         ),
     }
 }
@@ -351,11 +307,11 @@ pub(crate) fn floating_menu_button_style(
     status: button::Status,
 ) -> button::Style {
     let background = match status {
-        button::Status::Hovered if active => Color::from_rgba8(230, 232, 236, 0.96),
-        button::Status::Pressed if active => Color::from_rgba8(222, 225, 230, 0.98),
-        button::Status::Hovered => Color::from_rgba8(255, 255, 255, 0.10),
-        button::Status::Pressed => Color::from_rgba8(255, 255, 255, 0.14),
-        _ if active => Color::from_rgba8(236, 238, 242, 0.94),
+        button::Status::Hovered if active => Color::from_rgb8(255, 255, 255),
+        button::Status::Pressed if active => Color::from_rgb8(248, 250, 252),
+        button::Status::Hovered => Color::from_rgba8(255, 255, 255, 0.08),
+        button::Status::Pressed => Color::from_rgba8(255, 255, 255, 0.12),
+        _ if active => Color::from_rgb8(255, 255, 255),
         _ => Color::TRANSPARENT,
     };
 
@@ -368,22 +324,14 @@ pub(crate) fn floating_menu_button_style(
         },
         border: Border {
             color: if active {
-                Color::from_rgba8(223, 226, 232, 0.98)
+                Color::from_rgb8(226, 232, 240)
             } else {
                 Color::TRANSPARENT
             },
             width: if active { 1.0 } else { 0.0 },
-            radius: 14.0.into(),
+            radius: 12.0.into(),
         },
-        shadow: if active {
-            Shadow {
-                color: Color::from_rgba8(0, 0, 0, 0.04),
-                offset: Vector::new(0.0, 2.0),
-                blur_radius: 8.0,
-            }
-        } else {
-            Shadow::default()
-        },
+        shadow: Shadow::default(),
         ..Default::default()
     }
 }
@@ -513,40 +461,32 @@ pub(crate) fn titlebar_tab_button_style(
     if floating {
         let background = match status {
             button::Status::Hovered => {
-                Color::from_rgba8(255, 255, 255, if active { 0.18 } else { 0.10 })
+                Color::from_rgba8(255, 255, 255, if active { 0.16 } else { 0.10 })
             }
             button::Status::Pressed => {
-                Color::from_rgba8(255, 255, 255, if active { 0.24 } else { 0.14 })
+                Color::from_rgba8(255, 255, 255, if active { 0.20 } else { 0.13 })
             }
-            _ if active => Color::from_rgba8(255, 255, 255, 0.14),
-            _ => Color::TRANSPARENT,
+            _ if active => Color::from_rgba8(255, 255, 255, 0.13),
+            _ => Color::from_rgba8(255, 255, 255, 0.07),
         };
 
         return button::Style {
             background: Some(Background::Color(background)),
             text_color: if active {
-                manage_glass_text_primary()
+                Color::from_rgb8(245, 248, 255)
             } else {
-                manage_glass_text_secondary()
+                Color::from_rgb8(176, 188, 209)
             },
             border: Border {
                 color: if active {
-                    Color::from_rgba8(255, 255, 255, 0.22)
+                    Color::from_rgba8(255, 255, 255, 0.10)
                 } else {
-                    Color::TRANSPARENT
+                    Color::from_rgba8(255, 255, 255, 0.06)
                 },
-                width: if active { 1.0 } else { 0.0 },
-                radius: 14.0.into(),
+                width: 1.0,
+                radius: 10.0.into(),
             },
-            shadow: if active {
-                Shadow {
-                    color: Color::from_rgba8(255, 255, 255, 0.06),
-                    offset: Vector::new(0.0, 1.0),
-                    blur_radius: 10.0,
-                }
-            } else {
-                Shadow::default()
-            },
+            shadow: Shadow::default(),
             ..Default::default()
         };
     }
@@ -676,6 +616,25 @@ pub(crate) fn pick_list_field_style(
             color: border_color,
             width: 1.0,
             radius: 8.0.into(),
+        },
+    }
+}
+
+pub(crate) fn pick_list_menu_style(_theme: &Theme) -> iced::widget::overlay::menu::Style {
+    iced::widget::overlay::menu::Style {
+        background: Background::Color(Color::from_rgb8(255, 255, 255)),
+        border: Border {
+            color: color_ring_soft(),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        text_color: color_text_primary(),
+        selected_text_color: color_focus(),
+        selected_background: Background::Color(Color::from_rgb8(241, 245, 249)),
+        shadow: Shadow {
+            color: Color::from_rgba8(15, 23, 42, 0.07),
+            offset: Vector::new(0.0, 10.0),
+            blur_radius: 28.0,
         },
     }
 }

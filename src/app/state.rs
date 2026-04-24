@@ -13,19 +13,16 @@ pub(crate) struct App {
     pub(crate) main_window: Option<window::Id>,
     pub(crate) settings_window: Option<window::Id>,
     pub(crate) main_window_size: iced::Size,
-    pub(crate) main_window_vibrancy_installed: bool,
     pub(crate) cursor_position: Option<Point>,
     pub(crate) selected_menu: ManageMenu,
+    pub(crate) sidebar_menu_progress: [f32; 7],
     pub(crate) active_tab: ActiveTab,
     pub(crate) manage_tab_width: f32,
     pub(crate) terminal_tabs: Vec<TerminalTab>,
     pub(crate) next_terminal_id: u64,
     pub(crate) drawer: Option<DrawerState>,
-    pub(crate) active_connection_context: Option<i64>,
-    pub(crate) active_connection_context_position: Option<Point>,
+    pub(crate) context_menu: Option<ContextMenuState>,
     pub(crate) active_group_context: Option<i64>,
-    pub(crate) active_key_context: Option<i64>,
-    pub(crate) active_identity_context: Option<i64>,
     pub(crate) active_port_forward_context: Option<i64>,
     pub(crate) terminal_focus: Option<u64>,
     pub(crate) terminal_composer_focus: Option<u64>,
@@ -38,6 +35,19 @@ pub(crate) struct App {
     pub(crate) known_hosts: Vec<KnownHostEntry>,
     pub(crate) logs: Vec<String>,
     pub(crate) settings_editor: SettingsEditor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextMenuTarget {
+    Connection(i64),
+    Key(i64),
+    Identity(i64),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContextMenuState {
+    pub(crate) target: ContextMenuTarget,
+    pub(crate) position: Option<Point>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +274,7 @@ pub(crate) enum Message {
     OpenKeyContext(i64),
     OpenIdentityContext(i64),
     DuplicateConnection(i64),
+    DeleteConnection(i64),
     NewConnection,
     EditConnection(i64),
     OpenSftpConnection(i64),
@@ -344,19 +355,16 @@ impl App {
             main_window: None,
             settings_window: None,
             main_window_size: iced::Size::new(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT),
-            main_window_vibrancy_installed: false,
             cursor_position: None,
             selected_menu: ManageMenu::Connections,
+            sidebar_menu_progress: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             active_tab: ActiveTab::Manage,
             manage_tab_width: TITLEBAR_MANAGE_ACTIVE_WIDTH,
             terminal_tabs: Vec::new(),
             next_terminal_id: 1,
             drawer: None,
-            active_connection_context: None,
-            active_connection_context_position: None,
+            context_menu: None,
             active_group_context: None,
-            active_key_context: None,
-            active_identity_context: None,
             active_port_forward_context: None,
             terminal_focus: None,
             terminal_composer_focus: None,
@@ -410,7 +418,9 @@ impl App {
                         .find(|theme| theme.id == "atom-one-light")
                         .or_else(|| builtin_terminal_theme_by_id("atom-one-light"))
                         .map(|theme| TerminalTheme::from_settings(&theme.colors))
-                        .unwrap_or_else(|| TerminalTheme::from_settings(&TerminalColors::atom_one_light()))
+                        .unwrap_or_else(|| {
+                            TerminalTheme::from_settings(&TerminalColors::atom_one_light())
+                        })
                 }),
         }
     }
@@ -432,6 +442,20 @@ impl App {
             };
 
             tab.titlebar_width = animate_scalar(tab.titlebar_width, target);
+        }
+    }
+
+    pub(crate) fn animate_sidebar_menu(&mut self) {
+        for menu in ManageMenu::ALL {
+            let target = if self.selected_menu == menu { 1.0 } else { 0.0 };
+            let slot = &mut self.sidebar_menu_progress[menu.index()];
+
+            if (*slot - target).abs() <= SIDEBAR_MENU_ANIMATION_EPSILON {
+                *slot = target;
+                continue;
+            }
+
+            *slot += (target - *slot) * SIDEBAR_MENU_ANIMATION_LERP;
         }
     }
 
@@ -649,7 +673,7 @@ impl App {
         });
         self.active_tab = ActiveTab::Terminal(terminal_id);
         self.terminal_focus = Some(terminal_id);
-        self.active_connection_context = None;
+        self.context_menu = None;
         self.log(format!("开始连接 connection: {}", connection.name));
 
         Task::perform(connect_target(target, event_tx), move |result| {
@@ -662,8 +686,7 @@ impl App {
             .connections
             .iter()
             .find(|connection| {
-                connection.id == connection_id
-                    && connection.connection_type == ConnectionType::Ssh
+                connection.id == connection_id && connection.connection_type == ConnectionType::Ssh
             })
             .cloned()
         else {
@@ -709,7 +732,7 @@ impl App {
         });
         self.active_tab = ActiveTab::Terminal(terminal_id);
         self.terminal_focus = Some(terminal_id);
-        self.active_connection_context = None;
+        self.context_menu = None;
 
         let target = ConnectionTarget {
             connection,

@@ -1,6 +1,15 @@
 use super::*;
 use iced::widget::column;
 
+const CONNECTION_GRID_GAP: f32 = 14.0;
+const SCROLLBAR_SPACING: f32 = 6.0;
+const CONTEXT_MENU_ITEM_HEIGHT: f32 = 31.0;
+const CONTEXT_MENU_ITEM_GAP: f32 = 2.0;
+const CONTEXT_MENU_SHELL_PADDING: f32 = 3.0;
+const PICK_LIST_MENU_MAX_HEIGHT: f32 = 220.0;
+const TERMIUS_CARD_WIDTH: f32 = 244.0;
+const TERMIUS_CARD_HEIGHT: f32 = 60.0;
+
 pub(crate) fn title(app: &App, window: window::Id) -> String {
     if Some(window) == app.settings_window {
         return "Timon Settings".into();
@@ -31,9 +40,10 @@ pub(crate) fn subscription(_app: &App) -> Subscription<Message> {
             (_, iced::Event::Mouse(mouse::Event::CursorMoved { position })) => {
                 Some(Message::CursorMoved(position))
             }
-            (event::Status::Ignored, iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))) => {
-                Some(Message::CloseDrawer)
-            }
+            (
+                event::Status::Ignored,
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            ) => Some(Message::CloseDrawer),
             _ => None,
         }),
     ])
@@ -112,7 +122,7 @@ fn main_window_view<'a>(app: &'a App, window: window::Id) -> iced::widget::Conta
         .height(Length::Fill);
 
     container(shell)
-        .padding(1)
+        .padding(if manage_active { 0 } else { 1 })
         .width(Length::Fill)
         .height(Length::Fill)
         .style(move |_| {
@@ -130,42 +140,41 @@ fn titlebar_tab_strip<'a>(
 ) -> Element<'a, Message> {
     let floating = app.active_tab == ActiveTab::Manage;
     let manage_button_theme = terminal_theme.clone();
-    let manage = container(
-        button(
-            row![
-                text("Manage")
-                    .size(13)
-                    .color(if let Some(theme) = terminal_theme.as_ref() {
+    let manage =
+        container(
+            button(
+                row![text("Workspace").size(13).color(
+                    if let Some(theme) = terminal_theme.as_ref() {
                         terminal_chrome_text_color(theme, app.active_tab == ActiveTab::Manage)
                     } else if app.active_tab == ActiveTab::Manage {
                         manage_glass_text_primary()
                     } else {
                         manage_glass_text_secondary()
-                    }),
-            ]
-            .align_y(Vertical::Center),
+                    }
+                ),]
+                .align_y(Vertical::Center),
+            )
+            .width(Length::Fill)
+            .style(move |theme_ctx, status| {
+                if let Some(terminal_theme) = manage_button_theme.as_ref() {
+                    terminal_titlebar_tab_button_style(
+                        app.active_tab == ActiveTab::Manage,
+                        terminal_theme,
+                        theme_ctx,
+                        status,
+                    )
+                } else {
+                    titlebar_tab_button_style(
+                        app.active_tab == ActiveTab::Manage,
+                        floating,
+                        theme_ctx,
+                        status,
+                    )
+                }
+            })
+            .on_press(Message::ActivateManageTab),
         )
-        .width(Length::Fill)
-        .style(move |theme_ctx, status| {
-            if let Some(terminal_theme) = manage_button_theme.as_ref() {
-                terminal_titlebar_tab_button_style(
-                    app.active_tab == ActiveTab::Manage,
-                    terminal_theme,
-                    theme_ctx,
-                    status,
-                )
-            } else {
-                titlebar_tab_button_style(
-                    app.active_tab == ActiveTab::Manage,
-                    floating,
-                    theme_ctx,
-                    status,
-                )
-            }
-        })
-        .on_press(Message::ActivateManageTab),
-    )
-    .width(Length::Fixed(app.manage_tab_width));
+        .width(Length::Fixed(app.manage_tab_width));
 
     let tabs = terminal_tab_buttons(app, terminal_theme.clone());
     let separator: Element<'_, Message> = if app.terminal_tabs.is_empty() {
@@ -202,117 +211,208 @@ fn settings_window_view<'a>(app: &'a App) -> iced::widget::Container<'a, Message
         .available_fonts
         .iter()
         .find(|family| *family == &settings.font_family);
-    let font_section = settings_section(
-        "Font",
+    let cursor_shape_options = vec![
+        "block".to_string(),
+        "beam".to_string(),
+        "underline".to_string(),
+    ];
+    let selected_cursor_shape = cursor_shape_options
+        .iter()
+        .find(|shape| *shape == &settings.cursor_shape)
+        .cloned();
+
+    let appearance_section = settings_window_section(
+        ManageMenu::Settings,
+        "APPEARANCE",
         column![
-            labeled_pick_list(
-                "Family",
-                app.available_fonts.as_slice(),
-                selected_font,
-                "Select a terminal font",
-                |value| Message::SettingsFontChanged(FontField::Family, value)
+            settings_window_row(
+                "Terminal Typography",
+                "",
+                column![
+                    settings_window_two_column_fields(
+                        settings_window_pick_list(
+                            "Terminal Font",
+                            app.available_fonts.as_slice(),
+                            selected_font,
+                            "Select a terminal font",
+                            |value| Message::SettingsFontChanged(FontField::Family, value)
+                        )
+                        .into(),
+                        settings_window_input("Font Size", &settings.font_size, |value| {
+                            Message::SettingsFontChanged(FontField::Size, value)
+                        })
+                        .into(),
+                    ),
+                    settings_window_two_column_fields(
+                        settings_window_input("Line Height", &settings.line_height, |value| {
+                            Message::SettingsFontChanged(FontField::LineHeight, value)
+                        })
+                        .into(),
+                        settings_window_input(
+                            "Scrollback Lines",
+                            &settings.scrollback_lines,
+                            Message::SettingsScrollbackChanged
+                        )
+                        .into(),
+                    ),
+                ]
+                .spacing(14)
+                .into()
             ),
-            labeled_input("Size", &settings.font_size, |value| {
-                Message::SettingsFontChanged(FontField::Size, value)
-            }),
-            labeled_input("Line Height", &settings.line_height, |value| {
-                Message::SettingsFontChanged(FontField::LineHeight, value)
-            }),
-            labeled_input("Scrollback Lines", &settings.scrollback_lines, |value| {
-                Message::SettingsScrollbackChanged(value)
-            }),
-            button(if settings.font_thicken {
-                "Font Thicken: On"
-            } else {
-                "Font Thicken: Off"
-            })
-            .style(light_button_style)
-            .on_press(Message::SettingsFontThickenChanged(!settings.font_thicken,)),
+            settings_window_row(
+                "Font Rendering",
+                "",
+                settings_window_switch(
+                    settings.font_thicken,
+                    Message::SettingsFontThickenChanged(!settings.font_thicken),
+                )
+                .into(),
+            ),
         ]
-        .spacing(10),
+        .spacing(18),
     );
 
-    let cursor_section = settings_section(
-        "Cursor",
+    let cursor_section = settings_window_section(
+        ManageMenu::PortForwarding,
+        "CURSOR",
         column![
-            labeled_input(
-                "Shape (block / beam / underline)",
-                &settings.cursor_shape,
-                |value| Message::SettingsCursorChanged(CursorField::Shape, value)
+            settings_window_row(
+                "Cursor Behavior",
+                "",
+                column![settings_window_two_column_fields(
+                    settings_window_pick_list_owned(
+                        "Cursor Shape",
+                        cursor_shape_options,
+                        selected_cursor_shape,
+                        "Select a cursor shape",
+                        |value| Message::SettingsCursorChanged(CursorField::Shape, value)
+                    )
+                    .into(),
+                    settings_window_switch_field(
+                        "Cursor Blink",
+                        settings.cursor_blinking,
+                        Message::SettingsCursorBlinkChanged(!settings.cursor_blinking)
+                    )
+                    .into()
+                ),]
+                .into()
             ),
-            button(if settings.cursor_blinking {
-                "Blinking: On"
-            } else {
-                "Blinking: Off"
-            })
-            .style(light_button_style)
-            .on_press(Message::SettingsCursorBlinkChanged(
-                !settings.cursor_blinking,
+            settings_window_row(
+                "Cursor Colors",
+                "",
+                column![settings_window_two_column_fields(
+                    settings_window_input("Cursor Color", &settings.cursor_color, |value| {
+                        Message::SettingsColorChanged(ColorField::CursorColor, value)
+                    })
+                    .into(),
+                    settings_window_input("Cursor Text", &settings.cursor_text, |value| {
+                        Message::SettingsColorChanged(ColorField::CursorText, value)
+                    })
+                    .into()
+                ),]
+                .into()
+            ),
+        ]
+        .spacing(18),
+    );
+
+    let color_section = settings_window_section(
+        ManageMenu::KnownHosts,
+        "COLORS",
+        column![
+            settings_window_row(
+                "Base Palette",
+                "",
+                column![
+                    settings_window_two_column_fields(
+                        settings_window_input("Background", &settings.background, |value| {
+                            Message::SettingsColorChanged(ColorField::Background, value)
+                        })
+                        .into(),
+                        settings_window_input("Foreground", &settings.foreground, |value| {
+                            Message::SettingsColorChanged(ColorField::Foreground, value)
+                        })
+                        .into()
+                    ),
+                    settings_window_two_column_fields(
+                        settings_window_input(
+                            "Selection Background",
+                            &settings.selection_background,
+                            |value| {
+                                Message::SettingsColorChanged(
+                                    ColorField::SelectionBackground,
+                                    value,
+                                )
+                            }
+                        )
+                        .into(),
+                        settings_window_input(
+                            "Selection Foreground",
+                            &settings.selection_foreground,
+                            |value| {
+                                Message::SettingsColorChanged(
+                                    ColorField::SelectionForeground,
+                                    value,
+                                )
+                            }
+                        )
+                        .into()
+                    ),
+                ]
+                .spacing(14)
+                .into()
+            ),
+            settings_window_row(
+                "ANSI Palette",
+                "",
+                ansi_color_inputs(&settings.ansi_normal, &settings.ansi_bright).into(),
+            ),
+        ]
+        .spacing(18),
+    );
+
+    let sidebar = settings_window_sidebar();
+    let content = container(
+        column![
+            settings_window_header(),
+            scrollable(
+                column![
+                    settings_window_intro(),
+                    appearance_section,
+                    cursor_section,
+                    color_section,
+                    row![
+                        button("Reset Theme")
+                            .style(light_button_style)
+                            .on_press(Message::ResetThemeToAtomOneLight),
+                        button("Save Settings")
+                            .style(dark_button_style)
+                            .on_press(Message::SaveSettings),
+                    ]
+                    .spacing(10),
+                ]
+                .spacing(26)
+                .padding([24, 24])
+                .width(Length::Fill)
+            )
+            .height(Length::Fill)
+            .direction(iced::widget::scrollable::Direction::Vertical(
+                embedded_vertical_scrollbar(),
             )),
+            settings_window_status_bar(),
         ]
-        .spacing(10),
-    );
-
-    let colors_section = settings_section(
-        "ANSI Colors",
-        column![
-            labeled_input("Background", &settings.background, |value| {
-                Message::SettingsColorChanged(ColorField::Background, value)
-            }),
-            labeled_input("Foreground", &settings.foreground, |value| {
-                Message::SettingsColorChanged(ColorField::Foreground, value)
-            }),
-            labeled_input("Cursor Color", &settings.cursor_color, |value| {
-                Message::SettingsColorChanged(ColorField::CursorColor, value)
-            }),
-            labeled_input("Cursor Text", &settings.cursor_text, |value| {
-                Message::SettingsColorChanged(ColorField::CursorText, value)
-            }),
-            labeled_input(
-                "Selection Background",
-                &settings.selection_background,
-                |value| { Message::SettingsColorChanged(ColorField::SelectionBackground, value) }
-            ),
-            labeled_input(
-                "Selection Foreground",
-                &settings.selection_foreground,
-                |value| { Message::SettingsColorChanged(ColorField::SelectionForeground, value) }
-            ),
-            ansi_color_inputs(&settings.ansi_normal, &settings.ansi_bright),
-        ]
-        .spacing(10),
-    );
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .spacing(0),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(|_| manage_content_surface_style());
 
     container(
-        column![
-            row![
-                column![
-                    text("Settings").size(30).color(color_text_primary()),
-                    text("Terminal theme, cursor, font, and ANSI palette.")
-                        .size(14)
-                        .color(color_text_secondary()),
-                ]
-                .spacing(4),
-                Space::new().width(Length::Fill),
-                button("Reset to Atom One Light")
-                    .style(light_button_style)
-                    .on_press(Message::ResetThemeToAtomOneLight),
-                button("Save")
-                    .style(dark_button_style)
-                    .on_press(Message::SaveSettings),
-            ]
-            .align_y(Vertical::Center)
-            .spacing(10),
-            rule::horizontal(1),
-            scrollable(
-                column![font_section, cursor_section, colors_section]
-                    .spacing(18)
-                    .width(Length::Fill)
-            )
-            .height(Length::Fill),
-        ]
-        .spacing(14)
-        .padding(24),
+        row![sidebar, content]
+            .height(Length::Fill)
+            .width(Length::Fill),
     )
     .width(Length::Fill)
     .height(Length::Fill)
@@ -327,10 +427,20 @@ fn settings_window_view<'a>(app: &'a App) -> iced::widget::Container<'a, Message
 }
 
 fn manage_page_view(app: &App) -> iced::widget::Container<'_, Message> {
-    let sidebar = container(column![menu_buttons(app),].spacing(0).padding(0))
-        .width(Length::Fixed(SIDEBAR_WIDTH))
-        .height(Length::Fill)
-        .style(|_| manage_sidebar_style());
+    let sidebar = container(
+        column![
+            sidebar_brand(),
+            container(menu_buttons(app)).padding([10, 8]),
+            Space::new().height(Length::Fill),
+            container(rule::horizontal(1)).style(|_| manage_sidebar_style()),
+            sidebar_footer()
+        ]
+        .spacing(0)
+        .padding(0),
+    )
+    .width(Length::Fixed(SIDEBAR_WIDTH))
+    .height(Length::Fill)
+    .style(|_| sidebar_surface());
 
     let content_body: Element<'_, Message> = match app.selected_menu {
         ManageMenu::Connections => connections_view(app),
@@ -347,65 +457,106 @@ fn manage_page_view(app: &App) -> iced::widget::Container<'_, Message> {
     let content = container(content_body)
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding(24)
-        .style(|_| manage_content_surface_style());
+        .padding(0)
+        .style(|_| termius_workspace_style());
 
     let base: Element<'_, Message> = row![sidebar, content]
-        .spacing(18)
+        .spacing(0)
         .height(Length::Fill)
         .width(Length::Fill)
         .into();
 
-    let base: Element<'_, Message> = if app.selected_menu == ManageMenu::Connections {
-        if let Some(active_connection_id) = app.active_connection_context {
-            if let Some(connection) = app
-                .connections
-                .iter()
-                .find(|connection| connection.id == active_connection_id)
-            {
-                let menu_width = 132.0;
-                let menu_left = app
-                    .active_connection_context_position
-                    .map(|position| {
-                        (position.x + 6.0)
-                            .clamp(0.0, (app.main_window_size.width - menu_width - 12.0).max(0.0))
-                    })
-                    .unwrap_or(24.0);
-                let menu_top = app
-                    .active_connection_context_position
-                    .map(|position| (position.y - TITLEBAR_HEIGHT + 6.0).max(0.0))
-                    .unwrap_or(24.0);
+    let base: Element<'_, Message> = {
+        let overlay: Element<'_, Message> = match (app.selected_menu, app.context_menu) {
+            (
+                ManageMenu::Connections,
+                Some(ContextMenuState {
+                    target: ContextMenuTarget::Connection(id),
+                    position,
+                }),
+            ) => {
+                if let Some(connection) = app
+                    .connections
+                    .iter()
+                    .find(|connection| connection.id == id)
+                {
+                    let item_count = if connection.connection_type == ConnectionType::Ssh {
+                        5
+                    } else {
+                        4
+                    };
 
-                stack([
-                    base,
-                    mouse_area(
-                        container(Space::new().width(Length::Fill).height(Length::Fill))
-                            .width(Length::Fill)
-                            .height(Length::Fill),
+                    context_menu_overlay_layer(
+                        connection_context_menu(connection),
+                        position,
+                        app.main_window_size,
+                        Message::CloseDrawer,
+                        156.0,
+                        context_menu_height(item_count),
+                        TITLEBAR_HEIGHT,
                     )
-                    .on_press(Message::CloseDrawer)
-                    .into(),
-                    column![
-                        Space::new().height(Length::Fixed(menu_top)),
-                        row![
-                            Space::new().width(Length::Fixed(menu_left)),
-                            connection_context_menu(connection),
-                        ]
-                        .align_y(Vertical::Top)
-                    ]
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into(),
-                ])
-                .into()
-            } else {
-                base
+                } else {
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Shrink)
+                        .into()
+                }
             }
-        } else {
-            base
-        }
-    } else {
-        base
+            (
+                ManageMenu::Keychain,
+                Some(ContextMenuState {
+                    target: ContextMenuTarget::Key(id),
+                    position,
+                }),
+            ) => {
+                if let Some(key) = app.keys.iter().find(|key| key.id == id) {
+                    context_menu_overlay_layer(
+                        key_context_menu(key),
+                        position,
+                        app.main_window_size,
+                        Message::CloseDrawer,
+                        156.0,
+                        context_menu_height(1),
+                        TITLEBAR_HEIGHT,
+                    )
+                } else {
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Shrink)
+                        .into()
+                }
+            }
+            (
+                ManageMenu::Keychain,
+                Some(ContextMenuState {
+                    target: ContextMenuTarget::Identity(id),
+                    position,
+                }),
+            ) => {
+                if let Some(identity) = app.identities.iter().find(|identity| identity.id == id) {
+                    context_menu_overlay_layer(
+                        identity_context_menu(identity),
+                        position,
+                        app.main_window_size,
+                        Message::CloseDrawer,
+                        156.0,
+                        context_menu_height(1),
+                        TITLEBAR_HEIGHT,
+                    )
+                } else {
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Shrink)
+                        .into()
+                }
+            }
+            _ => Space::new()
+                .width(Length::Shrink)
+                .height(Length::Shrink)
+                .into(),
+        };
+
+        stack([base, overlay]).into()
     };
 
     let layered: Element<'_, Message> = if let Some(drawer) = &app.drawer {
@@ -439,6 +590,809 @@ fn manage_page_view(app: &App) -> iced::widget::Container<'_, Message> {
     };
 
     container(layered).width(Length::Fill).height(Length::Fill)
+}
+
+fn sidebar_brand<'a>() -> iced::widget::Container<'a, Message> {
+    container(Space::new().height(Length::Fixed(8.0))).padding(0)
+}
+
+fn sidebar_footer<'a>() -> iced::widget::Container<'a, Message> {
+    container(
+        row![
+            container(
+                text("TU")
+                    .size(10)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    })
+                    .color(color_focus())
+            )
+            .width(Length::Fixed(28.0))
+            .height(Length::Fixed(28.0))
+            .center_x(Length::Shrink)
+            .center_y(Length::Shrink)
+            .style(|_| {
+                bordered_surface(
+                    Color::from_rgb8(232, 240, 255),
+                    999.0,
+                    Color::from_rgb8(232, 240, 255),
+                    Shadow::default(),
+                )
+            }),
+            column![
+                text("Timon User")
+                    .size(12)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::DEFAULT
+                    })
+                    .color(color_text_primary()),
+                text("ADMIN")
+                    .size(10)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    })
+                    .color(color_text_muted()),
+            ]
+            .spacing(1),
+        ]
+        .spacing(12)
+        .align_y(Vertical::Center),
+    )
+    .padding([16, 16])
+}
+
+fn settings_window_sidebar<'a>() -> iced::widget::Container<'a, Message> {
+    container(
+        column![
+            sidebar_brand(),
+            column![
+                settings_window_sidebar_item(ManageMenu::Connections, "Connections", false),
+                settings_window_sidebar_item(ManageMenu::Keychain, "Keychain", false),
+                settings_window_sidebar_item(ManageMenu::PortForwarding, "Port Forwarding", false,),
+                settings_window_sidebar_item(ManageMenu::Settings, "Settings", true),
+            ]
+            .spacing(6)
+            .padding([4, 10]),
+            Space::new().height(Length::Fill),
+            container(rule::horizontal(1)).style(|_| manage_sidebar_style()),
+            sidebar_footer(),
+        ]
+        .spacing(0),
+    )
+    .width(Length::Fixed(SIDEBAR_WIDTH))
+    .height(Length::Fill)
+    .style(|_| sidebar_surface())
+}
+
+fn settings_window_sidebar_item<'a>(
+    icon_menu: ManageMenu,
+    label: &'a str,
+    active: bool,
+) -> iced::widget::Container<'a, Message> {
+    let icon_color = if active {
+        color_focus()
+    } else {
+        Color::from_rgb8(148, 163, 184)
+    };
+
+    container(
+        row![
+            manage_menu_icon(icon_menu, icon_color),
+            text(label)
+                .size(13)
+                .font(iced::Font {
+                    weight: if active {
+                        iced::font::Weight::Bold
+                    } else {
+                        iced::font::Weight::Semibold
+                    },
+                    ..iced::Font::DEFAULT
+                })
+                .color(if active {
+                    color_focus()
+                } else {
+                    Color::from_rgb8(71, 85, 105)
+                }),
+        ]
+        .spacing(12)
+        .align_y(Vertical::Center),
+    )
+    .padding([8.5, 12.0])
+    .style(move |_| {
+        if active {
+            bordered_surface(
+                Color::WHITE,
+                8.0,
+                Color::from_rgb8(216, 222, 230),
+                Shadow {
+                    color: Color::from_rgba8(15, 23, 42, 0.03),
+                    offset: Vector::new(0.0, 1.0),
+                    blur_radius: 2.0,
+                },
+            )
+        } else {
+            bordered_surface(
+                Color::TRANSPARENT,
+                8.0,
+                Color::TRANSPARENT,
+                Shadow::default(),
+            )
+        }
+    })
+}
+
+fn settings_window_header<'a>() -> iced::widget::Container<'a, Message> {
+    container(
+        row![
+            text("Settings")
+                .size(14)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::DEFAULT
+                })
+                .color(color_text_primary()),
+            Space::new().width(Length::Fill),
+            settings_window_search_shell(),
+            button("Save")
+                .style(dark_button_style)
+                .on_press(Message::SaveSettings),
+        ]
+        .spacing(12)
+        .align_y(Vertical::Center),
+    )
+    .padding([16, 22])
+    .style(|_| manage_content_surface_style())
+}
+
+fn settings_window_search_shell<'a>() -> iced::widget::Container<'a, Message> {
+    container(
+        text("Search settings...")
+            .size(13)
+            .color(color_text_faint()),
+    )
+    .width(Length::Fixed(192.0))
+    .padding([6, 14])
+    .style(|_| bordered_surface(color_canvas(), 8.0, color_ring_soft(), Shadow::default()))
+}
+
+fn settings_window_intro<'a>() -> iced::widget::Column<'a, Message> {
+    column![
+        text("Workspace Configuration")
+            .size(22)
+            .font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..iced::Font::DEFAULT
+            })
+            .color(color_text_primary()),
+        text("Manage terminal appearance, cursor behavior, and color credentials.")
+            .size(14)
+            .color(color_text_secondary()),
+    ]
+    .spacing(6)
+}
+
+fn settings_window_section<'a>(
+    icon_menu: ManageMenu,
+    label: &'a str,
+    content: iced::widget::Column<'a, Message>,
+) -> iced::widget::Column<'a, Message> {
+    column![
+        row![
+            manage_menu_icon(icon_menu, color_focus()),
+            text(label)
+                .size(11)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..iced::Font::DEFAULT
+                })
+                .color(color_text_secondary()),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center),
+        rule::horizontal(1),
+        content,
+    ]
+    .spacing(16)
+}
+
+fn settings_window_row<'a>(
+    title: &'a str,
+    description: &'a str,
+    control: Element<'a, Message>,
+) -> iced::widget::Container<'a, Message> {
+    let title_block: Element<'a, Message> = if description.is_empty() {
+        text(title)
+            .size(15)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::DEFAULT
+            })
+            .color(color_text_primary())
+            .into()
+    } else {
+        column![
+            text(title)
+                .size(15)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::DEFAULT
+                })
+                .color(color_text_primary()),
+            text(description).size(13).color(color_text_secondary()),
+        ]
+        .spacing(4)
+        .into()
+    };
+
+    container(
+        row![
+            container(title_block).width(Length::FillPortion(2)),
+            container(control)
+                .width(Length::FillPortion(3))
+                .center_y(Length::Shrink),
+        ]
+        .spacing(18)
+        .align_y(Vertical::Center),
+    )
+}
+
+fn settings_window_two_column_fields<'a>(
+    left: Element<'a, Message>,
+    right: Element<'a, Message>,
+) -> iced::widget::Row<'a, Message> {
+    row![
+        container(left).width(Length::FillPortion(1)),
+        container(right).width(Length::FillPortion(1)),
+    ]
+    .spacing(14)
+}
+
+fn settings_window_input<'a>(
+    label: &'a str,
+    value: &'a str,
+    on_input: impl Fn(String) -> Message + 'static + Copy,
+) -> iced::widget::Column<'a, Message> {
+    column![
+        text(label)
+            .size(12)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::DEFAULT
+            })
+            .color(color_text_secondary()),
+        text_input(label, value)
+            .on_input(on_input)
+            .padding([5, 12])
+            .style(field_style),
+    ]
+    .spacing(8)
+    .width(Length::Fill)
+}
+
+fn settings_window_pick_list<'a>(
+    label: &'a str,
+    options: &'a [String],
+    selected: Option<&'a String>,
+    placeholder: &'a str,
+    on_select: impl Fn(String) -> Message + 'a + Copy,
+) -> iced::widget::Column<'a, Message> {
+    column![
+        text(label)
+            .size(12)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::DEFAULT
+            })
+            .color(color_text_secondary()),
+        pick_list(options, selected, on_select)
+            .placeholder(placeholder)
+            .width(Length::Fill)
+            .menu_height(Length::Fixed(PICK_LIST_MENU_MAX_HEIGHT))
+            .padding([5, 12])
+            .style(pick_list_field_style)
+            .menu_style(pick_list_menu_style),
+    ]
+    .spacing(8)
+    .width(Length::Fill)
+}
+
+fn settings_window_pick_list_owned<'a>(
+    label: &'a str,
+    options: Vec<String>,
+    selected: Option<String>,
+    placeholder: &'a str,
+    on_select: impl Fn(String) -> Message + 'static,
+) -> iced::widget::Column<'a, Message> {
+    column![
+        text(label)
+            .size(12)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::DEFAULT
+            })
+            .color(color_text_secondary()),
+        pick_list(options, selected, on_select)
+            .placeholder(placeholder)
+            .width(Length::Fill)
+            .menu_height(Length::Fixed(PICK_LIST_MENU_MAX_HEIGHT))
+            .padding([5, 12])
+            .style(pick_list_field_style)
+            .menu_style(pick_list_menu_style),
+    ]
+    .spacing(8)
+    .width(Length::Fill)
+}
+
+fn settings_window_switch<'a>(
+    enabled: bool,
+    message: Message,
+) -> iced::widget::Button<'a, Message> {
+    let thumb = container(
+        Space::new()
+            .width(Length::Fixed(16.0))
+            .height(Length::Fixed(16.0)),
+    )
+    .style(|_| bordered_surface(Color::WHITE, 999.0, Color::TRANSPARENT, Shadow::default()));
+
+    let track = if enabled {
+        row![Space::new().width(Length::Fill), thumb]
+    } else {
+        row![thumb, Space::new().width(Length::Fill)]
+    }
+    .width(Length::Fixed(38.0))
+    .height(Length::Fixed(20.0))
+    .padding([2, 2])
+    .align_y(Vertical::Center);
+
+    button(container(track).style(move |_| {
+        bordered_surface(
+            if enabled {
+                Color::from_rgb8(16, 185, 129)
+            } else {
+                Color::from_rgb8(226, 232, 240)
+            },
+            999.0,
+            Color::TRANSPARENT,
+            Shadow::default(),
+        )
+    }))
+    .style(|_, _| button::Style::default())
+    .on_press(message)
+}
+
+fn settings_window_switch_field<'a>(
+    label: &'a str,
+    enabled: bool,
+    message: Message,
+) -> iced::widget::Column<'a, Message> {
+    column![
+        text(label)
+            .size(12)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::DEFAULT
+            })
+            .color(color_text_secondary()),
+        settings_window_switch(enabled, message),
+    ]
+    .spacing(8)
+}
+
+fn settings_window_status_bar<'a>() -> iced::widget::Container<'a, Message> {
+    container(
+        row![
+            row![
+                text("•").size(14).color(Color::from_rgb8(16, 185, 129)),
+                text("LOCAL CONFIG")
+                    .size(11)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..iced::Font::DEFAULT
+                    })
+                    .color(Color::from_rgb8(16, 185, 129)),
+                text("TERMINAL PREFERENCES")
+                    .size(11)
+                    .color(color_text_muted()),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+            Space::new().width(Length::Fill),
+            text("Timon Settings").size(11).color(color_text_muted()),
+        ]
+        .align_y(Vertical::Center),
+    )
+    .padding([8, 16])
+    .style(|_| manage_sidebar_style())
+}
+
+fn termius_workspace_style() -> container::Style {
+    bordered_surface(
+        Color::from_rgb8(237, 241, 242),
+        0.0,
+        Color::TRANSPARENT,
+        Shadow::default(),
+    )
+}
+
+fn termius_toolbar_style() -> container::Style {
+    bordered_surface(
+        Color::from_rgb8(229, 237, 240),
+        0.0,
+        Color::TRANSPARENT,
+        Shadow::default(),
+    )
+}
+
+fn termius_search_style() -> container::Style {
+    bordered_surface(
+        Color::from_rgb8(239, 246, 248),
+        10.0,
+        Color::from_rgb8(210, 222, 228),
+        Shadow::default(),
+    )
+}
+
+fn termius_card_style() -> container::Style {
+    bordered_surface(
+        Color::WHITE,
+        14.0,
+        Color::from_rgba8(15, 23, 42, 0.04),
+        Shadow::default(),
+    )
+}
+
+fn termius_action_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered => Color::from_rgb8(98, 102, 126),
+        button::Status::Pressed => Color::from_rgb8(76, 80, 102),
+        _ => Color::from_rgb8(84, 88, 112),
+    };
+
+    button_style_base(background, Color::WHITE, background, Shadow::default())
+}
+
+fn termius_icon_button_style(active: bool) -> container::Style {
+    bordered_surface(
+        if active {
+            Color::from_rgb8(41, 204, 231)
+        } else {
+            Color::from_rgb8(144, 166, 181)
+        },
+        10.0,
+        Color::TRANSPARENT,
+        Shadow::default(),
+    )
+}
+
+fn sidebar_surface() -> container::Style {
+    bordered_surface(
+        Color::from_rgb8(247, 249, 250),
+        0.0,
+        Color::from_rgb8(223, 230, 235),
+        Shadow::default(),
+    )
+}
+
+fn sidebar_item_style(
+    active: bool,
+    progress: f32,
+    _theme: &Theme,
+    status: button::Status,
+) -> button::Style {
+    let hover_surface = match status {
+        button::Status::Hovered => Color::from_rgb8(237, 243, 246),
+        button::Status::Pressed => Color::from_rgb8(226, 235, 239),
+        _ => Color::TRANSPARENT,
+    };
+    let active_surface = if active {
+        mix_color(
+            Color::TRANSPARENT,
+            Color::from_rgb8(231, 238, 242),
+            progress,
+        )
+    } else {
+        Color::TRANSPARENT
+    };
+    let background = if active {
+        match status {
+            button::Status::Hovered => Color::from_rgb8(231, 238, 242),
+            button::Status::Pressed => Color::from_rgb8(224, 233, 238),
+            _ => active_surface,
+        }
+    } else {
+        hover_surface
+    };
+    let border_color = mix_color(
+        Color::TRANSPARENT,
+        Color::TRANSPARENT,
+        if active { progress } else { 0.0 },
+    );
+    let shadow_progress = 0.0;
+    let shadow_color = with_alpha(Color::from_rgb8(15, 23, 42), 0.03 * shadow_progress);
+
+    iced::widget::button::Style {
+        background: Some(Background::Color(background)),
+        text_color: mix_color(Color::from_rgb8(71, 85, 105), color_focus(), progress),
+        border: Border {
+            color: border_color,
+            width: shadow_progress,
+            radius: 6.0.into(),
+        },
+        shadow: Shadow {
+            color: shadow_color,
+            offset: Vector::new(0.0, shadow_progress),
+            blur_radius: 2.0 * shadow_progress,
+        },
+        ..Default::default()
+    }
+}
+
+fn sidebar_item<'a>(
+    icon: Element<'a, Message>,
+    label: &'a str,
+    progress: f32,
+    active: bool,
+    on_press: Message,
+) -> iced::widget::Button<'a, Message> {
+    button(
+        row![
+            icon,
+            text(label)
+                .size(SIDEBAR_MENU_FONT_SIZE_INACTIVE)
+                .line_height(iced::Pixels(SIDEBAR_MENU_FONT_SIZE_INACTIVE))
+                .align_y(Vertical::Center)
+                .font(iced::Font {
+                    weight: if active {
+                        iced::font::Weight::Bold
+                    } else {
+                        iced::font::Weight::Semibold
+                    },
+                    ..iced::Font::DEFAULT
+                })
+                .color(mix_color(
+                    Color::from_rgb8(71, 85, 105),
+                    color_focus(),
+                    progress,
+                )),
+        ]
+        .spacing(12)
+        .align_y(Vertical::Center),
+    )
+    .padding([8.5, 12.0])
+    .width(Length::Fill)
+    .style(move |theme, status| sidebar_item_style(active, progress, theme, status))
+    .on_press(on_press)
+}
+
+fn menu_item_style(
+    danger: bool,
+    active: bool,
+    disabled: bool,
+    status: button::Status,
+) -> iced::widget::button::Style {
+    let text_color = if danger {
+        Color::from_rgb8(239, 68, 68)
+    } else if active {
+        color_focus()
+    } else if disabled {
+        color_text_muted()
+    } else {
+        color_text_primary()
+    };
+
+    let background = match status {
+        _ if active => with_alpha(color_focus(), 0.08),
+        _ if disabled => Color::TRANSPARENT,
+        button::Status::Hovered => Color::from_rgb8(248, 250, 252),
+        button::Status::Pressed => Color::from_rgb8(241, 245, 249),
+        _ => Color::TRANSPARENT,
+    };
+
+    iced::widget::button::Style {
+        background: Some(Background::Color(background)),
+        text_color,
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 8.0.into(),
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+fn menu_item<'a>(
+    label: &'a str,
+    danger: bool,
+    on_press: Message,
+) -> iced::widget::Button<'a, Message> {
+    button(
+        text(label)
+            .size(13)
+            .font(iced::Font {
+                weight: iced::font::Weight::Medium,
+                ..iced::Font::DEFAULT
+            })
+            .color(if danger {
+                Color::from_rgb8(239, 68, 68)
+            } else {
+                color_text_primary()
+            }),
+    )
+    .padding([7, 10])
+    .height(Length::Fixed(CONTEXT_MENU_ITEM_HEIGHT))
+    .width(Length::Fill)
+    .style(move |_theme, status| menu_item_style(danger, false, false, status))
+    .on_press(on_press)
+}
+
+fn context_menu<'a>(
+    width: f32,
+    content: iced::widget::Column<'a, Message>,
+) -> iced::widget::Container<'a, Message> {
+    container(content)
+        .padding(CONTEXT_MENU_SHELL_PADDING)
+        .width(Length::Fixed(width))
+        .style(|_| context_menu_style())
+}
+
+fn context_menu_height(item_count: usize) -> f32 {
+    if item_count == 0 {
+        CONTEXT_MENU_SHELL_PADDING * 2.0
+    } else {
+        CONTEXT_MENU_SHELL_PADDING * 2.0
+            + CONTEXT_MENU_ITEM_HEIGHT * item_count as f32
+            + CONTEXT_MENU_ITEM_GAP * item_count.saturating_sub(1) as f32
+    }
+}
+
+fn context_menu_style() -> container::Style {
+    bordered_surface(
+        Color::from_rgb8(255, 255, 255),
+        12.0,
+        color_ring_soft(),
+        Shadow {
+            color: Color::from_rgba8(15, 23, 42, 0.08),
+            offset: Vector::new(0.0, 10.0),
+            blur_radius: 24.0,
+        },
+    )
+}
+
+fn context_menu_overlay_layer<'a>(
+    menu: Element<'a, Message>,
+    position: Option<Point>,
+    window_size: iced::Size,
+    on_close: Message,
+    menu_width: f32,
+    menu_height_guess: f32,
+    top_offset: f32,
+) -> Element<'a, Message> {
+    let inset = 12.0;
+    let cursor_gap = 6.0;
+    let safe_menu_height = menu_height_guess;
+    let left = position
+        .map(|cursor| {
+            let cursor_x = cursor.x;
+            let fits_right = cursor_x + cursor_gap + menu_width <= window_size.width - inset;
+            let fits_left = cursor_x - cursor_gap - menu_width >= inset;
+
+            let proposed = if fits_right || !fits_left {
+                cursor_x + cursor_gap
+            } else {
+                cursor_x - cursor_gap - menu_width
+            };
+
+            proposed.clamp(inset, (window_size.width - menu_width - inset).max(inset))
+        })
+        .unwrap_or(24.0);
+    let top = position
+        .map(|cursor| {
+            let cursor_y = cursor.y - top_offset;
+            let fits_bottom =
+                cursor_y + cursor_gap + safe_menu_height <= window_size.height - inset;
+            let fits_top = cursor_y - cursor_gap - safe_menu_height >= inset;
+
+            let proposed = if fits_bottom || !fits_top {
+                cursor_y + cursor_gap
+            } else {
+                cursor_y - cursor_gap - safe_menu_height
+            };
+
+            proposed.clamp(
+                inset,
+                (window_size.height - safe_menu_height - inset).max(inset),
+            )
+        })
+        .unwrap_or(24.0);
+
+    stack([
+        mouse_area(
+            container(Space::new().width(Length::Fill).height(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .on_press(on_close)
+        .into(),
+        column![
+            Space::new().height(Length::Fixed(top)),
+            row![Space::new().width(Length::Fixed(left)), menu].align_y(Vertical::Top)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+    ])
+    .into()
+}
+
+fn connection_grid_columns(
+    available_width: f32,
+    min_width: f32,
+    gap: f32,
+    max_columns: usize,
+) -> usize {
+    let max_fit_columns = ((available_width.max(min_width) + gap) / (min_width + gap))
+        .floor()
+        .max(1.0) as usize;
+
+    max_fit_columns.min(max_columns).max(1)
+}
+
+fn connection_grid_item_width(
+    available_width: f32,
+    columns: usize,
+    min_width: f32,
+    max_width: f32,
+    gap: f32,
+) -> f32 {
+    ((available_width.max(min_width) - gap * (columns.saturating_sub(1) as f32)) / columns as f32)
+        .clamp(min_width, max_width)
+}
+
+fn connection_cards_grid<'a>(connections: &'a [Connection]) -> Element<'a, Message> {
+    iced::widget::responsive(move |size| {
+        let columns =
+            connection_grid_columns(size.width, TERMIUS_CARD_WIDTH, CONNECTION_GRID_GAP, 3);
+        let item_width = connection_grid_item_width(
+            size.width,
+            columns,
+            TERMIUS_CARD_WIDTH,
+            TERMIUS_CARD_WIDTH,
+            CONNECTION_GRID_GAP,
+        );
+
+        let rows = connections.chunks(columns).fold(
+            column![].spacing(CONNECTION_GRID_GAP),
+            |column, chunk| {
+                let row =
+                    chunk
+                        .iter()
+                        .fold(row![].spacing(CONNECTION_GRID_GAP), |row, connection| {
+                            row.push(
+                                container(connection_list_card(connection))
+                                    .width(Length::Fixed(item_width))
+                                    .height(Length::Fixed(TERMIUS_CARD_HEIGHT)),
+                            )
+                        });
+
+                column.push(row)
+            },
+        );
+
+        container(rows).width(Length::Fill).into()
+    })
+    .into()
+}
+
+fn embedded_vertical_scrollbar() -> iced::widget::scrollable::Scrollbar {
+    iced::widget::scrollable::Scrollbar::default().spacing(SCROLLBAR_SPACING)
+}
+
+fn embedded_horizontal_scrollbar() -> iced::widget::scrollable::Scrollbar {
+    iced::widget::scrollable::Scrollbar::default().spacing(SCROLLBAR_SPACING)
 }
 
 fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
@@ -529,90 +1483,257 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
 }
 
 fn connections_view(app: &App) -> Element<'_, Message> {
-    const PROFILE_GRID_COLUMN_GAP: f32 = 14.0;
-    const PROFILE_GRID_ROW_GAP: f32 = 10.0;
-
-    let header = row![
-        column![
-            text("Connections").size(32).color(color_text_primary()),
-            text("Saved SSH targets and local shells.")
-                .size(14)
-                .color(color_text_secondary()),
-        ]
-        .spacing(4),
-        Space::new().width(Length::Fill),
-        button("New Group")
-            .style(light_button_style)
-            .on_press(Message::NewGroup),
-        button("New Connection")
-            .style(dark_button_style)
-            .on_press(Message::NewConnection),
-    ]
-    .align_y(Vertical::Center);
-
-    let groups: Element<'_, Message> = if app.groups.is_empty() {
-        Space::new().height(Length::Shrink).into()
-    } else {
-        column![
-            text("Groups")
-                .size(12)
-                .font(iced::Font::MONOSPACE)
-                .color(color_text_muted()),
-            column(group_rows(app)).spacing(8)
-        ]
-        .spacing(8)
-        .into()
-    };
-
-    let cards: Element<'_, Message> = if app.connections.is_empty() {
+    let search_bar = container(
         container(
-            text("No connections yet.")
-                .size(15)
-                .color(color_text_secondary()),
+            row![
+                text("Find a host or ssh user@hostname...")
+                    .size(14)
+                    .color(Color::from_rgb8(117, 139, 151)),
+                Space::new().width(Length::Fill),
+                container(
+                    text("CONNECT")
+                        .size(11)
+                        .font(iced::Font {
+                            weight: iced::font::Weight::Bold,
+                            ..iced::Font::DEFAULT
+                        })
+                        .color(Color::from_rgb8(156, 174, 184))
+                )
+                .padding([6, 11])
+                .style(|_| {
+                    bordered_surface(
+                        Color::from_rgb8(221, 232, 237),
+                        8.0,
+                        Color::TRANSPARENT,
+                        Shadow::default(),
+                    )
+                }),
+            ]
+            .align_y(Vertical::Center),
         )
-        .padding(20)
-        .style(|_| section_surface_style())
-        .into()
+        .height(Length::Fixed(36.0))
+        .width(Length::Fill)
+        .padding([0, 10])
+        .style(|_| termius_search_style()),
+    )
+    .height(Length::Fixed(48.0))
+    .width(Length::Fill)
+    .padding([6, 10])
+    .style(|_| termius_toolbar_style());
+
+    let action_bar = container(
+        row![
+            button("▦  NEW HOST")
+                .style(termius_action_button_style)
+                .on_press(Message::NewConnection),
+            button("⌄")
+                .style(termius_action_button_style)
+                .on_press(Message::NewGroup),
+            button("▣  TERMINAL")
+                .style(termius_action_button_style)
+                .on_press(Message::NewConnection),
+            button("▰  SERIAL")
+                .style(termius_action_button_style)
+                .on_press(Message::NewConnection),
+            Space::new().width(Length::Fill),
+            text("▦⌄  ◆⌄  A⌄")
+                .size(18)
+                .color(Color::from_rgb8(22, 28, 44)),
+            container(text("0").size(13).color(Color::WHITE))
+                .width(Length::Fixed(28.0))
+                .height(Length::Fixed(28.0))
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
+                .style(|_| termius_icon_button_style(true)),
+            container(text("+").size(20).color(Color::WHITE))
+                .width(Length::Fixed(28.0))
+                .height(Length::Fixed(28.0))
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
+                .style(|_| termius_icon_button_style(false)),
+        ]
+        .spacing(10)
+        .align_y(Vertical::Center),
+    )
+    .height(Length::Fixed(46.0))
+    .width(Length::Fill)
+    .padding([8, 12])
+    .style(|_| termius_toolbar_style());
+
+    let group_cards = if app.groups.is_empty() {
+        row![termius_group_card("Default".into(), "0 Hosts".into())]
+            .spacing(CONNECTION_GRID_GAP)
+            .wrap()
     } else {
-        iced::widget::responsive(move |size| {
-            let available_cards_width = size.width.max(CONNECTION_CARD_MIN_WIDTH);
-            let max_fit_columns = ((available_cards_width + PROFILE_GRID_COLUMN_GAP)
-                / (CONNECTION_CARD_MIN_WIDTH + PROFILE_GRID_COLUMN_GAP))
-                .floor()
-                .max(1.0) as usize;
-            let connection_columns = max_fit_columns.min(app.connections.len().max(1));
-            let connection_card_width = ((available_cards_width
-                - PROFILE_GRID_COLUMN_GAP * (connection_columns.saturating_sub(1) as f32))
-                / connection_columns as f32)
-                .clamp(CONNECTION_CARD_MIN_WIDTH, CONNECTION_CARD_MAX_WIDTH);
-            let title_max_width = (connection_card_width - 98.0).max(48.0);
-
-            let rows = app.connections.chunks(connection_columns).fold(
-                column![].spacing(PROFILE_GRID_ROW_GAP),
-                |column, chunk| {
-                    let row = chunk.iter().fold(
-                        row![].spacing(PROFILE_GRID_COLUMN_GAP),
-                        |row, connection| {
-                            row.push(
-                                container(connection_card(app, connection, title_max_width))
-                                    .width(Length::Fixed(connection_card_width))
-                                    .height(Length::Fixed(CONNECTION_CARD_HEIGHT)),
-                            )
-                        },
-                    );
-
-                    column.push(row)
-                },
-            );
-
-            container(rows).width(Length::Fill).into()
-        })
-        .into()
+        row(app
+            .groups
+            .iter()
+            .filter(|group| group.parent_id.is_none())
+            .map(|group| {
+                let count = app
+                    .connections
+                    .iter()
+                    .filter(|connection| connection.group_id == Some(group.id))
+                    .count();
+                termius_group_card(group.name.clone(), format!("{count} Hosts"))
+            })
+            .collect::<Vec<Element<'_, Message>>>())
+        .spacing(CONNECTION_GRID_GAP)
+        .wrap()
     };
 
-    scrollable(column![header, groups, cards].spacing(18))
-        .height(Length::Fill)
+    let all_connections: Element<'_, Message> = if app.connections.is_empty() {
+        container(
+            text("No hosts yet.")
+                .size(14)
+                .color(Color::from_rgb8(77, 91, 105)),
+        )
+        .padding([18, 20])
+        .style(|_| termius_card_style())
         .into()
+    } else {
+        connection_cards_grid(app.connections.as_slice())
+    };
+
+    column![
+        search_bar,
+        action_bar,
+        scrollable(
+            column![
+                termius_section_title("Groups"),
+                group_cards,
+                Space::new().height(Length::Fixed(12.0)),
+                termius_section_title("Hosts"),
+                all_connections,
+            ]
+            .spacing(14)
+            .padding([20, 32])
+            .width(Length::Fill)
+        )
+        .height(Length::Fill)
+        .direction(iced::widget::scrollable::Direction::Vertical(
+            embedded_vertical_scrollbar(),
+        )),
+    ]
+    .spacing(0)
+    .height(Length::Fill)
+    .into()
+}
+
+fn termius_section_title<'a>(label: &'a str) -> Element<'a, Message> {
+    text(label)
+        .size(15)
+        .font(iced::Font {
+            weight: iced::font::Weight::Bold,
+            ..iced::Font::DEFAULT
+        })
+        .color(Color::from_rgb8(18, 25, 39))
+        .into()
+}
+
+fn termius_group_card(name: String, caption: String) -> Element<'static, Message> {
+    container(
+        row![
+            container(text("▦").size(22).color(Color::WHITE))
+                .width(Length::Fixed(40.0))
+                .height(Length::Fixed(40.0))
+                .center_x(Length::Shrink)
+                .center_y(Length::Shrink)
+                .style(|_| {
+                    bordered_surface(
+                        Color::from_rgb8(0, 91, 139),
+                        10.0,
+                        Color::TRANSPARENT,
+                        Shadow::default(),
+                    )
+                }),
+            column![
+                text(name)
+                    .size(14)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::DEFAULT
+                    })
+                    .color(Color::from_rgb8(20, 28, 39)),
+                text(caption)
+                    .size(12)
+                    .color(Color::from_rgb8(116, 134, 148)),
+            ]
+            .spacing(1),
+        ]
+        .spacing(14)
+        .align_y(Vertical::Center),
+    )
+    .padding([10, 12])
+    .width(Length::Fixed(244.0))
+    .height(Length::Fixed(60.0))
+    .style(|_| termius_card_style())
+    .into()
+}
+
+fn connection_avatar<'a>(
+    connection: &'a Connection,
+    size: f32,
+) -> iced::widget::Container<'a, Message> {
+    let accent = match connection.connection_type {
+        ConnectionType::Local => Color::from_rgb8(50, 211, 142),
+        ConnectionType::Ssh => Color::from_rgb8(242, 78, 28),
+    };
+    let initial = connection
+        .name
+        .chars()
+        .next()
+        .map(|ch| ch.to_ascii_uppercase().to_string())
+        .unwrap_or_else(|| "C".to_string());
+
+    container(text(initial).size(size * 0.42).color(Color::WHITE))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .center_x(Length::Shrink)
+        .center_y(Length::Shrink)
+        .style(move |_| bordered_surface(accent, 10.0, Color::TRANSPARENT, Shadow::default()))
+}
+
+fn connection_list_card<'a>(connection: &'a Connection) -> Element<'a, Message> {
+    mouse_area(
+        container(
+            row![
+                connection_avatar(connection, 40.0),
+                column![
+                    text(&connection.name)
+                        .size(13)
+                        .font(iced::Font {
+                            weight: iced::font::Weight::Semibold,
+                            ..iced::Font::DEFAULT
+                        })
+                        .color(Color::from_rgb8(20, 28, 39)),
+                    text(connection_termius_secondary_text(connection))
+                        .size(12)
+                        .color(Color::from_rgb8(96, 114, 128)),
+                ]
+                .spacing(1)
+                .width(Length::Fill),
+            ]
+            .spacing(12)
+            .align_y(Vertical::Center),
+        )
+        .padding([10, 12])
+        .style(|_| termius_card_style()),
+    )
+    .on_right_press(Message::OpenConnectionContext(connection.id))
+    .into()
+}
+
+fn connection_termius_secondary_text(connection: &Connection) -> String {
+    if connection.connection_type == ConnectionType::Local {
+        "local".to_string()
+    } else if !connection.display_username.trim().is_empty() {
+        format!("ssh, {}", connection.display_username)
+    } else if !connection.username.trim().is_empty() {
+        format!("ssh, {}", connection.username)
+    } else {
+        "ssh".to_string()
+    }
 }
 
 fn keychain_view(app: &App) -> Element<'_, Message> {
@@ -634,7 +1755,7 @@ fn keychain_view(app: &App) -> Element<'_, Message> {
             .align_y(Vertical::Center)
         ]
         .spacing(12),
-        |column, key| column.push(key_card(app, key)),
+        |column, key| column.push(key_card(key)),
     );
 
     let identities = app.identities.iter().fold(
@@ -655,11 +1776,14 @@ fn keychain_view(app: &App) -> Element<'_, Message> {
             .align_y(Vertical::Center)
         ]
         .spacing(12),
-        |column, identity| column.push(identity_card(app, identity)),
+        |column, identity| column.push(identity_card(identity)),
     );
 
     scrollable(column![keys, identities].spacing(24))
         .height(Length::Fill)
+        .direction(iced::widget::scrollable::Direction::Vertical(
+            embedded_vertical_scrollbar(),
+        ))
         .into()
 }
 
@@ -707,6 +1831,9 @@ fn known_hosts_view(app: &App) -> Element<'_, Message> {
         .spacing(14),
     )
     .height(Length::Fill)
+    .direction(iced::widget::scrollable::Direction::Vertical(
+        embedded_vertical_scrollbar(),
+    ))
     .into()
 }
 
@@ -734,6 +1861,9 @@ fn logs_view(app: &App) -> Element<'_, Message> {
         .spacing(12),
     )
     .height(Length::Fill)
+    .direction(iced::widget::scrollable::Direction::Vertical(
+        embedded_vertical_scrollbar(),
+    ))
     .into()
 }
 
@@ -759,7 +1889,12 @@ fn port_forwarding_view(app: &App) -> Element<'_, Message> {
         |column, forward| column.push(port_forward_card(app, forward)),
     );
 
-    scrollable(content).height(Length::Fill).into()
+    scrollable(content)
+        .height(Length::Fill)
+        .direction(iced::widget::scrollable::Direction::Vertical(
+            embedded_vertical_scrollbar(),
+        ))
+        .into()
 }
 
 fn sftp_page_view<'a>(
@@ -781,7 +1916,9 @@ fn sftp_page_view<'a>(
                                     .size(10)
                                     .font(iced::Font::MONOSPACE)
                                     .color(color_text_muted()),
-                                text(entry.name.clone()).size(14).color(color_text_primary()),
+                                text(entry.name.clone())
+                                    .size(14)
+                                    .color(color_text_primary()),
                                 Space::new().width(Length::Fill),
                                 text(if entry.is_dir {
                                     "-".to_string()
@@ -797,17 +1934,16 @@ fn sftp_page_view<'a>(
                         )
                         .style(light_button_style)
                         .width(Length::Fill)
-                        .on_press(Message::SftpOpenEntry(
-                            id,
-                            entry.path.clone(),
-                            entry.is_dir,
-                        ))
+                        .on_press(Message::SftpOpenEntry(id, entry.path.clone(), entry.is_dir))
                         .into()
                     })
                     .collect::<Vec<Element<'a, Message>>>(),
             )
             .spacing(6),
         )
+        .direction(iced::widget::scrollable::Direction::Vertical(
+            embedded_vertical_scrollbar(),
+        ))
         .into()
     };
 
@@ -824,14 +1960,20 @@ fn sftp_page_view<'a>(
         )
         .padding(14)
         .style(|_| section_surface_style()),
-    );
+    )
+    .direction(iced::widget::scrollable::Direction::Vertical(
+        embedded_vertical_scrollbar(),
+    ));
 
     container(
         column![
             row![
                 column![
                     text("SFTP").size(28).color(color_text_primary()),
-                    text(&sftp.current_path).size(13).font(iced::Font::MONOSPACE).color(color_text_secondary()),
+                    text(&sftp.current_path)
+                        .size(13)
+                        .font(iced::Font::MONOSPACE)
+                        .color(color_text_secondary()),
                 ]
                 .spacing(4),
                 Space::new().width(Length::Fill),
@@ -879,26 +2021,6 @@ fn placeholder_view<'a>(title: &'a str, body: &'a str) -> iced::widget::Containe
     .height(Length::Fill)
 }
 
-fn group_chip<'a>(app: &'a App, group: &'a Group) -> Element<'a, Message> {
-    button(
-        row![
-            text(group_display_name(app, group))
-                .size(12)
-                .color(color_text_primary()),
-            text(format!("#{}", group.id))
-                .size(10)
-                .font(iced::Font::MONOSPACE)
-                .color(color_text_muted()),
-        ]
-        .spacing(8)
-        .align_y(Vertical::Center),
-    )
-    .style(light_button_style)
-    .padding([6, 10])
-    .on_press(Message::EditGroup(group.id))
-    .into()
-}
-
 fn drawer_view<'a>(app: &'a App, drawer: &'a DrawerState) -> iced::widget::Container<'a, Message> {
     let content: Element<'_, _> = match drawer {
         DrawerState::Connection(editor) => connection_drawer(app, editor).into(),
@@ -917,113 +2039,6 @@ fn drawer_view<'a>(app: &'a App, drawer: &'a DrawerState) -> iced::widget::Conta
     .padding([12, 12])
     .width(Length::Shrink)
     .height(Length::Fill)
-}
-
-fn connection_card<'a>(
-    app: &'a App,
-    connection: &'a Connection,
-    title_max_width: f32,
-) -> Element<'a, Message> {
-    let type_label = if connection.connection_type == ConnectionType::Local {
-        "local"
-    } else {
-        "ssh"
-    };
-    let connection_label = if connection.connection_type == ConnectionType::Local {
-        format!("Local PTY · {}", shell_display_name(&connection.shell_path))
-    } else {
-        format!(
-            "{}@{}:{}",
-            empty_as_dash(&connection.display_username),
-            empty_as_dash(&connection.host),
-            connection.port
-        )
-    };
-
-    let body = column![
-        row![
-            column![
-                text(truncate_to_width(&connection.name, title_max_width, 18.0))
-                    .size(18)
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .color(color_text_primary()),
-                text(connection_label)
-                    .size(13)
-                    .color(color_text_secondary()),
-            ]
-            .width(Length::Fill)
-            .spacing(3),
-            Space::new().width(Length::Fill),
-            container(
-                text(type_label.to_uppercase())
-                    .size(11)
-                    .font(iced::Font::MONOSPACE)
-                    .color(Color::from_rgb8(0, 104, 214)),
-            )
-            .padding([4, 10])
-            .style(|_| status_badge_style()),
-        ],
-        row![
-            if let Some(group) = app
-                .groups
-                .iter()
-                .find(|group| Some(group.id) == connection.group_id)
-            {
-                container(
-                    text(group_display_name(app, group))
-                        .size(11)
-                        .font(iced::Font::MONOSPACE)
-                        .color(color_text_muted()),
-                )
-                .padding([4, 10])
-                .style(|_| neutral_badge_style())
-            } else {
-                container(Space::new().width(Length::Shrink).height(Length::Shrink))
-                    .padding(0)
-                    .style(|_| bordered_surface(Color::TRANSPARENT, 0.0, Color::TRANSPARENT, Shadow::default()))
-            },
-            container(
-                text(if connection.connection_type == ConnectionType::Local {
-                    shell_display_name(&connection.shell_path)
-                } else {
-                    empty_as_dash(&connection.host)
-                })
-                .size(11)
-                .font(iced::Font::MONOSPACE)
-                .color(color_text_muted()),
-            )
-            .padding([4, 10])
-            .style(|_| neutral_badge_style()),
-            container(
-                text(if connection.connection_type == ConnectionType::Local {
-                    if connection.work_dir.trim().is_empty() {
-                        "Home".to_string()
-                    } else {
-                        connection.work_dir.clone()
-                    }
-                } else {
-                    empty_as_dash(&connection.display_username)
-                })
-                .size(11)
-                .font(iced::Font::MONOSPACE)
-                .color(color_text_muted()),
-            )
-            .padding([4, 10])
-            .style(|_| neutral_badge_style()),
-        ]
-        .spacing(8),
-    ]
-    .spacing(10);
-
-    mouse_area(
-        container(body)
-            .padding([14, 16])
-            .width(Length::Fill)
-            .height(Length::Fixed(CONNECTION_CARD_HEIGHT))
-            .style(|_| capsule_surface_style()),
-    )
-    .on_right_press(Message::OpenConnectionContext(connection.id))
-    .into()
 }
 
 fn truncate_to_width(value: &str, max_width: f32, font_size: f32) -> String {
@@ -1076,59 +2091,59 @@ fn estimated_char_width(ch: char) -> f32 {
 }
 
 fn connection_context_menu(connection: &Connection) -> Element<'static, Message> {
-    let mut actions = column![
-        button("Connect")
-            .width(Length::Fill)
-            .style(light_button_style)
-            .on_press(Message::ConnectConnection(connection.id)),
-    ]
-    .spacing(6);
+    let mut actions = column![menu_item(
+        "Connect",
+        false,
+        Message::ConnectConnection(connection.id),
+    )]
+    .spacing(CONTEXT_MENU_ITEM_GAP);
 
     if connection.connection_type == ConnectionType::Ssh {
-        actions = actions.push(
-            button("Open SFTP")
-                .width(Length::Fill)
-                .style(light_button_style)
-                .on_press(Message::OpenSftpConnection(connection.id)),
-        );
+        actions = actions.push(menu_item(
+            "Open SFTP",
+            false,
+            Message::OpenSftpConnection(connection.id),
+        ));
     }
 
     actions = actions
-        .push(
-            button("Duplicate")
-                .width(Length::Fill)
-                .style(light_button_style)
-                .on_press(Message::DuplicateConnection(connection.id)),
-        )
-        .push(
-            button("Edit")
-                .width(Length::Fill)
-                .style(light_button_style)
-                .on_press(Message::EditConnection(connection.id)),
-        );
+        .push(menu_item(
+            "Duplicate",
+            false,
+            Message::DuplicateConnection(connection.id),
+        ))
+        .push(menu_item(
+            "Edit",
+            false,
+            Message::EditConnection(connection.id),
+        ))
+        .push(menu_item(
+            "Delete",
+            true,
+            Message::DeleteConnection(connection.id),
+        ));
 
-    container(actions)
-    .padding(8)
-    .width(Length::Fixed(132.0))
-    .style(|_| context_menu_style())
+    context_menu(156.0, actions).into()
+}
+
+fn key_context_menu(key: &SshKey) -> Element<'static, Message> {
+    context_menu(
+        156.0,
+        column![menu_item("Edit", false, Message::EditKey(key.id))].spacing(CONTEXT_MENU_ITEM_GAP),
+    )
     .into()
 }
 
-fn key_card<'a>(app: &'a App, key: &'a SshKey) -> Element<'a, Message> {
-    let actions: Element<'a, Message> = if app.active_key_context == Some(key.id) {
-        container(
-            row![
-                button("Edit")
-                    .style(light_button_style)
-                    .on_press(Message::EditKey(key.id))
-            ]
-            .spacing(8),
-        )
-        .into()
-    } else {
-        Space::new().height(Length::Shrink).into()
-    };
+fn identity_context_menu(identity: &Identity) -> Element<'static, Message> {
+    context_menu(
+        156.0,
+        column![menu_item("Edit", false, Message::EditIdentity(identity.id))]
+            .spacing(CONTEXT_MENU_ITEM_GAP),
+    )
+    .into()
+}
 
+fn key_card<'a>(key: &'a SshKey) -> Element<'a, Message> {
     let body = column![
         row![
             text(key.name.clone()).size(20).color(color_text_primary()),
@@ -1150,7 +2165,6 @@ fn key_card<'a>(app: &'a App, key: &'a SshKey) -> Element<'a, Message> {
         .size(12)
         .font(iced::Font::MONOSPACE)
         .color(color_text_muted()),
-        actions,
     ]
     .spacing(12);
 
@@ -1159,21 +2173,7 @@ fn key_card<'a>(app: &'a App, key: &'a SshKey) -> Element<'a, Message> {
         .into()
 }
 
-fn identity_card<'a>(app: &'a App, identity: &'a Identity) -> Element<'a, Message> {
-    let actions: Element<'a, Message> = if app.active_identity_context == Some(identity.id) {
-        container(
-            row![
-                button("Edit")
-                    .style(light_button_style)
-                    .on_press(Message::EditIdentity(identity.id))
-            ]
-            .spacing(8),
-        )
-        .into()
-    } else {
-        Space::new().height(Length::Shrink).into()
-    };
-
+fn identity_card<'a>(identity: &'a Identity) -> Element<'a, Message> {
     let body = column![
         row![
             text(identity.name.clone())
@@ -1198,7 +2198,6 @@ fn identity_card<'a>(app: &'a App, identity: &'a Identity) -> Element<'a, Messag
         .size(12)
         .font(iced::Font::MONOSPACE)
         .color(color_text_muted()),
-        actions,
     ]
     .spacing(12);
 
@@ -1213,12 +2212,11 @@ fn connection_drawer<'a>(
 ) -> iced::widget::Container<'a, Message> {
     let type_options = vec!["ssh".to_string(), "local".to_string()];
     let group_option_pairs = std::iter::once(("None".to_string(), "None".to_string()))
-        .chain(app.groups.iter().map(|group| {
-            (
-                group_display_name(app, group),
-                group.id.to_string(),
-            )
-        }))
+        .chain(
+            app.groups
+                .iter()
+                .map(|group| (group_display_name(app, group), group.id.to_string())),
+        )
         .collect::<Vec<_>>();
     let group_options = group_option_pairs
         .iter()
@@ -1391,7 +2389,11 @@ fn theme_gallery<'a>(app: &'a App, editor: &'a ConnectionEditor) -> Element<'a, 
     let themes = std::iter::once((
         "default".to_string(),
         "settings.json".to_string(),
-        ["#fafafa".to_string(), "#383a42".to_string(), "#4078f2".to_string()],
+        [
+            "#fafafa".to_string(),
+            "#383a42".to_string(),
+            "#4078f2".to_string(),
+        ],
     ))
     .chain(app.terminal_themes.iter().map(|theme| {
         (
@@ -1407,56 +2409,64 @@ fn theme_gallery<'a>(app: &'a App, editor: &'a ConnectionEditor) -> Element<'a, 
     .collect::<Vec<_>>();
 
     column![
-        text("Theme").size(12).font(iced::Font::MONOSPACE).color(color_text_muted()),
-        row(
-            themes
-                .into_iter()
-                .map(|(id, path, colors)| {
-                    let active = editor.theme_id == id;
-                    let label = id.clone();
-                    button(
-                        column![
-                            text(label)
-                                .size(13)
-                                .color(if active { color_focus() } else { color_text_primary() }),
-                            text(path)
-                                .size(10)
-                                .font(iced::Font::MONOSPACE)
-                                .color(color_text_muted()),
-                            row(
-                                colors
-                                    .into_iter()
-                                    .map(|hex| {
-                                        container(Space::new().width(Length::Fixed(12.0)).height(Length::Fixed(12.0)))
-                                            .style(move |_| {
-                                                bordered_surface(
-                                                    parse_hex_color(&hex).unwrap_or(Color::BLACK),
-                                                    999.0,
-                                                    Color::TRANSPARENT,
-                                                    Shadow::default(),
-                                                )
-                                            })
-                                            .into()
-                                    })
-                                    .collect::<Vec<Element<'_, Message>>>()
-                            )
-                            .spacing(6),
-                        ]
-                        .spacing(6)
-                    )
-                    .padding([10, 12])
-                    .style(move |theme, status| {
-                        if active {
-                            floating_menu_button_style(true, theme, status)
+        text("Theme")
+            .size(12)
+            .font(iced::Font::MONOSPACE)
+            .color(color_text_muted()),
+        row(themes
+            .into_iter()
+            .map(|(id, path, colors)| {
+                let active = editor.theme_id == id;
+                let label = id.clone();
+                button(
+                    column![
+                        text(label).size(13).color(if active {
+                            color_focus()
                         } else {
-                            light_button_style(theme, status)
-                        }
-                    })
-                    .on_press(Message::ConnectionFieldChanged(ConnectionField::ThemeId, id))
-                    .into()
+                            color_text_primary()
+                        }),
+                        text(path)
+                            .size(10)
+                            .font(iced::Font::MONOSPACE)
+                            .color(color_text_muted()),
+                        row(colors
+                            .into_iter()
+                            .map(|hex| {
+                                container(
+                                    Space::new()
+                                        .width(Length::Fixed(12.0))
+                                        .height(Length::Fixed(12.0)),
+                                )
+                                .style(move |_| {
+                                    bordered_surface(
+                                        parse_hex_color(&hex).unwrap_or(Color::BLACK),
+                                        999.0,
+                                        Color::TRANSPARENT,
+                                        Shadow::default(),
+                                    )
+                                })
+                                .into()
+                            })
+                            .collect::<Vec<Element<'_, Message>>>())
+                        .spacing(6),
+                    ]
+                    .spacing(6),
+                )
+                .padding([10, 12])
+                .style(move |theme, status| {
+                    if active {
+                        floating_menu_button_style(true, theme, status)
+                    } else {
+                        light_button_style(theme, status)
+                    }
                 })
-                .collect::<Vec<Element<'_, Message>>>()
-        )
+                .on_press(Message::ConnectionFieldChanged(
+                    ConnectionField::ThemeId,
+                    id,
+                ))
+                .into()
+            })
+            .collect::<Vec<Element<'_, Message>>>())
         .spacing(10)
         .wrap(),
     ]
@@ -1526,37 +2536,16 @@ fn group_drawer<'a>(app: &'a App, editor: &'a GroupEditor) -> iced::widget::Cont
 
 fn group_display_name(app: &App, group: &Group) -> String {
     if let Some(parent_id) = group.parent_id {
-        if let Some(parent) = app.groups.iter().find(|candidate| candidate.id == parent_id) {
+        if let Some(parent) = app
+            .groups
+            .iter()
+            .find(|candidate| candidate.id == parent_id)
+        {
             return format!("{} / {}", parent.name, group.name);
         }
     }
 
     group.name.clone()
-}
-
-fn group_rows<'a>(app: &'a App) -> Vec<Element<'a, Message>> {
-    let mut rows = Vec::new();
-
-    for parent in app.groups.iter().filter(|group| group.parent_id.is_none()) {
-        rows.push(row![group_chip(app, parent)].spacing(8).into());
-
-        let children = app
-            .groups
-            .iter()
-            .filter(|group| group.parent_id == Some(parent.id))
-            .map(|group| group_chip(app, group))
-            .collect::<Vec<_>>();
-
-        if !children.is_empty() {
-            rows.push(
-                container(row(children).spacing(8).wrap())
-                    .padding([0, 18])
-                    .into(),
-            );
-        }
-    }
-
-    rows
 }
 
 fn key_drawer(editor: &KeyEditor) -> iced::widget::Container<'_, Message> {
@@ -1650,9 +2639,13 @@ fn port_forward_card<'a>(app: &'a App, forward: &'a PortForward) -> Element<'a, 
         column![
             row![
                 column![
-                    text(if forward.label.trim().is_empty() { "Forward" } else { &forward.label })
-                        .size(18)
-                        .color(color_text_primary()),
+                    text(if forward.label.trim().is_empty() {
+                        "Forward"
+                    } else {
+                        &forward.label
+                    })
+                    .size(18)
+                    .color(color_text_primary()),
                     text(format!(
                         "{}:{} → {}:{}",
                         forward.bind_address,
@@ -1667,7 +2660,11 @@ fn port_forward_card<'a>(app: &'a App, forward: &'a PortForward) -> Element<'a, 
                 .spacing(4),
                 Space::new().width(Length::Fill),
                 button(if running { "Stop" } else { "Start" })
-                    .style(if running { light_button_style } else { dark_button_style })
+                    .style(if running {
+                        light_button_style
+                    } else {
+                        dark_button_style
+                    })
                     .on_press(Message::TogglePortForward(forward.id, !running)),
                 button("Edit")
                     .style(light_button_style)
@@ -1729,9 +2726,13 @@ fn port_forward_drawer<'a>(
             labeled_input("Label", &editor.label, |value| {
                 Message::PortForwardFieldChanged(PortForwardField::Label, value)
             }),
-            labeled_pick_list_owned("Type", type_options, selected_type, "Select a type", |value| {
-                Message::PortForwardTypeChanged(value)
-            }),
+            labeled_pick_list_owned(
+                "Type",
+                type_options,
+                selected_type,
+                "Select a type",
+                |value| { Message::PortForwardTypeChanged(value) }
+            ),
             labeled_input("Bind Address", &editor.bind_address, |value| {
                 Message::PortForwardFieldChanged(PortForwardField::BindAddress, value)
             }),
@@ -1807,46 +2808,30 @@ fn drawer_shell<'a>(
         .height(Length::Fill)
         .width(Length::Fill)
         .direction(iced::widget::scrollable::Direction::Vertical(
-            iced::widget::scrollable::Scrollbar::default(),
+            embedded_vertical_scrollbar(),
         )),
     )
     .padding(20)
 }
 
-fn menu_buttons(app: &App) -> iced::widget::Column<'_, Message> {
+fn menu_buttons(app: &App) -> Element<'_, Message> {
     ManageMenu::ALL
         .into_iter()
-        .fold(column![].spacing(4), |column, item| {
-            column.push(
-                button(
-                    row![
-                        manage_menu_icon(
-                            item,
-                            if app.selected_menu == item {
-                                color_focus()
-                            } else {
-                                manage_glass_text_secondary()
-                            }
-                        ),
-                        text(item.title())
-                            .size(14)
-                            .color(if app.selected_menu == item {
-                                color_focus()
-                            } else {
-                                manage_glass_text_secondary()
-                            }),
-                    ]
-                    .spacing(12)
-                    .align_y(Vertical::Center),
+        .fold(column![].spacing(2), |column, item| {
+            let progress = app.sidebar_menu_progress[item.index()];
+            column.push(sidebar_item(
+                manage_menu_icon(
+                    item,
+                    mix_color(Color::from_rgb8(148, 163, 184), color_focus(), progress),
                 )
-                .style(move |theme, status| {
-                    floating_menu_button_style(app.selected_menu == item, theme, status)
-                })
-                .padding([10, 14])
-                .width(Length::Fill)
-                .on_press(Message::SelectMenu(item)),
-            )
+                .into(),
+                item.title(),
+                progress,
+                app.selected_menu == item,
+                Message::SelectMenu(item),
+            ))
         })
+        .into()
 }
 
 fn terminal_tab_buttons<'a>(
@@ -1948,7 +2933,7 @@ fn terminal_tab_buttons<'a>(
     row![
         scrollable(row)
             .direction(iced::widget::scrollable::Direction::Horizontal(
-                iced::widget::scrollable::Scrollbar::default()
+                embedded_horizontal_scrollbar()
             ))
             .width(Length::Fill)
     ]
@@ -2055,27 +3040,7 @@ fn labeled_input<'a>(
             .style(field_style),
     ]
     .spacing(6)
-}
-
-fn labeled_pick_list<'a>(
-    label: &'a str,
-    options: &'a [String],
-    selected: Option<&'a String>,
-    placeholder: &'a str,
-    on_select: impl Fn(String) -> Message + 'a + Copy,
-) -> iced::widget::Column<'a, Message> {
-    column![
-        text(label)
-            .size(12)
-            .font(iced::Font::MONOSPACE)
-            .color(color_text_muted()),
-        pick_list(options, selected, on_select)
-            .placeholder(placeholder)
-            .width(Length::Fill)
-            .padding([10, 12])
-            .style(pick_list_field_style),
-    ]
-    .spacing(6)
+    .width(Length::Fill)
 }
 
 fn labeled_pick_list_owned<'a>(
@@ -2093,10 +3058,13 @@ fn labeled_pick_list_owned<'a>(
         pick_list(options, selected, on_select)
             .placeholder(placeholder)
             .width(Length::Fill)
+            .menu_height(Length::Fixed(PICK_LIST_MENU_MAX_HEIGHT))
             .padding([10, 12])
-            .style(pick_list_field_style),
+            .style(pick_list_field_style)
+            .menu_style(pick_list_menu_style),
     ]
     .spacing(6)
+    .width(Length::Fill)
 }
 
 fn labeled_text_editor<'a>(
@@ -2118,13 +3086,4 @@ fn labeled_text_editor<'a>(
             .style(text_editor_field_style),
     ]
     .spacing(6)
-}
-
-fn settings_section<'a>(
-    title: &'a str,
-    content: iced::widget::Column<'a, Message>,
-) -> iced::widget::Container<'a, Message> {
-    container(column![text(title).size(22).color(color_text_primary()), content].spacing(14))
-        .padding(18)
-        .style(|_| section_surface_style())
 }

@@ -1,17 +1,5 @@
 use super::*;
 
-#[cfg(target_os = "macos")]
-use iced::window::raw_window_handle::RawWindowHandle;
-#[cfg(target_os = "macos")]
-use objc2::rc::Retained;
-#[cfg(target_os = "macos")]
-use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSGlassEffectView, NSGlassEffectViewStyle, NSView,
-    NSWindowOrderingMode,
-};
-#[cfg(target_os = "macos")]
-use objc2_foundation::MainThreadMarker;
-
 pub(crate) fn normalize_selection(anchor: TerminalPoint, head: TerminalPoint) -> TerminalSelection {
     if (anchor.line, anchor.column) <= (head.line, head.column) {
         TerminalSelection {
@@ -147,76 +135,6 @@ pub(crate) fn settings_window_settings() -> window::Settings {
     }
 }
 
-pub(crate) fn install_main_window_vibrancy<Message>(id: window::Id) -> Task<Message>
-where
-    Message: Send + 'static,
-{
-    #[cfg(target_os = "macos")]
-    {
-        return window::run(id, |window| {
-            install_macos_vibrancy(window);
-        })
-        .discard();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = id;
-        Task::none()
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn install_macos_vibrancy(window: &dyn window::raw_window_handle::HasWindowHandle) {
-    let Ok(window_handle) = window.window_handle() else {
-        return;
-    };
-
-    let RawWindowHandle::AppKit(handle) = window_handle.as_raw() else {
-        return;
-    };
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-
-    let ns_view: Retained<NSView> =
-        unsafe { Retained::retain(handle.ns_view.as_ptr().cast()) }.expect("valid NSView");
-
-    let container = unsafe { ns_view.superview() }.unwrap_or_else(|| ns_view.clone());
-    let container_view: &NSView = container.as_ref();
-    let target_view: &NSView = ns_view.as_ref();
-    let is_same_view = std::ptr::eq::<NSView>(container_view, target_view);
-
-    let frame = if is_same_view {
-        ns_view.bounds()
-    } else {
-        ns_view.frame()
-    };
-
-    let effect_view = NSGlassEffectView::new(mtm);
-
-    effect_view.setFrame(frame);
-    effect_view.setStyle(NSGlassEffectViewStyle::Regular);
-    effect_view.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-    );
-
-    if is_same_view {
-        container.addSubview_positioned_relativeTo(
-            effect_view.as_ref(),
-            NSWindowOrderingMode::Below,
-            None,
-        );
-    } else {
-        container.addSubview_positioned_relativeTo(
-            effect_view.as_ref(),
-            NSWindowOrderingMode::Below,
-            Some(ns_view.as_ref()),
-        );
-    }
-}
-
 pub(crate) fn parse_optional_i64(value: &str) -> Option<i64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -289,19 +207,6 @@ pub(crate) fn default_local_shell_path() -> String {
     #[cfg(not(windows))]
     {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
-    }
-}
-
-pub(crate) fn shell_display_name(shell_path: &str) -> String {
-    let trimmed = shell_path.trim();
-    if trimmed.is_empty() {
-        "Login Shell".into()
-    } else {
-        std::path::Path::new(trimmed)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(trimmed)
-            .to_string()
     }
 }
 

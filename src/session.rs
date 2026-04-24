@@ -144,7 +144,9 @@ pub async fn connect_target(
     }
 }
 
-pub async fn connect_sftp_target(target: ConnectionTarget) -> std::result::Result<SftpHandle, String> {
+pub async fn connect_sftp_target(
+    target: ConnectionTarget,
+) -> std::result::Result<SftpHandle, String> {
     let mut handle = open_client(&target)
         .await
         .map_err(|error| format!("SFTP 连接失败: {error:#}"))?;
@@ -231,12 +233,9 @@ pub async fn start_port_forward(
         .await
         .map_err(|error| format!("端口转发认证失败: {error:#}"))?;
 
-    let listener = TcpListener::bind(format!(
-        "{}:{}",
-        forward.bind_address, forward.bind_port
-    ))
-    .await
-    .map_err(|error| format!("监听本地端口失败: {error}"))?;
+    let listener = TcpListener::bind(format!("{}:{}", forward.bind_address, forward.bind_port))
+        .await
+        .map_err(|error| format!("监听本地端口失败: {error}"))?;
 
     let (stop_tx, mut stop_rx) = watch::channel(false);
     let bind_address = forward.bind_address.clone();
@@ -404,7 +403,11 @@ fn resolved_local_work_dir(connection: &Connection) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn build_local_command(connection: &Connection, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
+fn build_local_command(
+    connection: &Connection,
+    shell: &str,
+    work_dir: &str,
+) -> Result<CommandBuilder> {
     let user = std::env::var("USER")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -427,7 +430,11 @@ fn build_local_command(connection: &Connection, shell: &str, work_dir: &str) -> 
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn build_local_command(_connection: &Connection, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
+fn build_local_command(
+    _connection: &Connection,
+    shell: &str,
+    work_dir: &str,
+) -> Result<CommandBuilder> {
     let mut command = CommandBuilder::new(shell);
     if work_dir.trim().is_empty() {
         command.arg("-l");
@@ -438,7 +445,11 @@ fn build_local_command(_connection: &Connection, shell: &str, work_dir: &str) ->
 }
 
 #[cfg(windows)]
-fn build_local_command(_connection: &Connection, shell: &str, work_dir: &str) -> Result<CommandBuilder> {
+fn build_local_command(
+    _connection: &Connection,
+    shell: &str,
+    work_dir: &str,
+) -> Result<CommandBuilder> {
     let mut command = CommandBuilder::new(shell);
     if !work_dir.trim().is_empty() {
         command.cwd(work_dir);

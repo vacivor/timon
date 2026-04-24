@@ -64,7 +64,7 @@ pub(crate) fn manage_menu_icon(
     };
 
     svg(handle)
-        .width(Length::Fixed(16.0))
-        .height(Length::Fixed(16.0))
+        .width(Length::Fixed(18.0))
+        .height(Length::Fixed(18.0))
         .style(move |_theme, _status| iced::widget::svg::Style { color: Some(color) })
 }

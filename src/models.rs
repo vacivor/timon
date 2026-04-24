@@ -245,6 +245,18 @@ impl ManageMenu {
             Self::Settings => "Settings",
         }
     }
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::Connections => 0,
+            Self::Keychain => 1,
+            Self::PortForwarding => 2,
+            Self::Snippets => 3,
+            Self::KnownHosts => 4,
+            Self::Logs => 5,
+            Self::Settings => 6,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

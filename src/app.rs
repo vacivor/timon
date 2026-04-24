@@ -28,8 +28,7 @@ use crate::persistence::{
 };
 use crate::session::{
     ConnectionTarget, PortForwardHandle, SessionCommand, SessionEvent, SessionHandle, SftpHandle,
-    connect_sftp_target, connect_target, sftp_list_dir, sftp_read_file_preview,
-    start_port_forward,
+    connect_sftp_target, connect_target, sftp_list_dir, sftp_read_file_preview, start_port_forward,
 };
 use crate::terminal::{
     GlyphAtlas, TerminalAtlas, TerminalCanvasEvent, TerminalEvent, TerminalFont, TerminalPoint,

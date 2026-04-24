@@ -5,10 +5,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::MainWindowReady(id) => {
             app.main_window = Some(id);
             app.resize_terminals();
-            if !app.main_window_vibrancy_installed {
-                app.main_window_vibrancy_installed = true;
-                return install_main_window_vibrancy(id);
-            }
         }
         Message::CursorMoved(position) => {
             app.cursor_position = Some(position);
@@ -73,16 +69,13 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             }
 
             app.animate_titlebar_tabs();
+            app.animate_sidebar_menu();
         }
         Message::WindowEvent(id, event) => match event {
             window::Event::Opened { size, .. } => {
                 if Some(id) == app.main_window {
                     app.main_window_size = size;
                     app.resize_terminals();
-                    if !app.main_window_vibrancy_installed {
-                        app.main_window_vibrancy_installed = true;
-                        return install_main_window_vibrancy(id);
-                    }
                 }
             }
             window::Event::Resized(size) => {
@@ -102,7 +95,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                     app.settings_window = None;
                 }
                 if Some(id) == app.main_window {
-                    app.main_window_vibrancy_installed = false;
                     return iced::exit();
                 }
             }
@@ -225,11 +217,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::DragWindow(id) => return window::drag(id),
         Message::SelectMenu(menu) => {
             app.selected_menu = menu;
-            app.active_connection_context = None;
-            app.active_connection_context_position = None;
+            let progress = &mut app.sidebar_menu_progress[menu.index()];
+            if *progress < SIDEBAR_MENU_ACTIVATE_PRIME {
+                *progress = SIDEBAR_MENU_ACTIVATE_PRIME;
+            }
+            app.context_menu = None;
             app.active_group_context = None;
-            app.active_key_context = None;
-            app.active_identity_context = None;
             app.active_port_forward_context = None;
 
             if menu == ManageMenu::Settings {
@@ -242,16 +235,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             app.terminal_focus = None;
             app.terminal_composer_focus = None;
             app.resize_terminals();
-            app.active_connection_context = None;
-            app.active_connection_context_position = None;
+            app.context_menu = None;
         }
         Message::ActivateTerminal(id) => {
             app.active_tab = ActiveTab::Terminal(id);
             app.terminal_focus = Some(id);
             app.terminal_composer_focus = None;
             app.resize_terminals();
-            app.active_connection_context = None;
-            app.active_connection_context_position = None;
+            app.context_menu = None;
         }
         Message::CloseTerminal(id) => app.close_terminal_tab(id),
         Message::TerminalSelectionStarted(id, point) => {
@@ -309,25 +300,27 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::OpenConnectionContext(id) => {
-            app.active_connection_context = Some(id);
-            app.active_connection_context_position = app.cursor_position;
+            app.context_menu = Some(ContextMenuState {
+                target: ContextMenuTarget::Connection(id),
+                position: app.cursor_position,
+            });
             app.active_group_context = None;
-            app.active_key_context = None;
-            app.active_identity_context = None;
             app.active_port_forward_context = None;
         }
         Message::OpenKeyContext(id) => {
-            app.active_connection_context = None;
+            app.context_menu = Some(ContextMenuState {
+                target: ContextMenuTarget::Key(id),
+                position: app.cursor_position,
+            });
             app.active_group_context = None;
-            app.active_key_context = Some(id);
-            app.active_identity_context = None;
             app.active_port_forward_context = None;
         }
         Message::OpenIdentityContext(id) => {
-            app.active_connection_context = None;
+            app.context_menu = Some(ContextMenuState {
+                target: ContextMenuTarget::Identity(id),
+                position: app.cursor_position,
+            });
             app.active_group_context = None;
-            app.active_key_context = None;
-            app.active_identity_context = Some(id);
             app.active_port_forward_context = None;
         }
         Message::DuplicateConnection(id) => {
@@ -348,8 +341,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 match app.database.save_connection(&mut duplicated) {
                     Ok(()) => {
                         app.reload_data();
-                        app.active_connection_context = None;
-                        app.active_connection_context_position = None;
+                        app.context_menu = None;
                         app.log(format!("Duplicated connection: {}", duplicated.name));
                     }
                     Err(error) => {
@@ -358,16 +350,39 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::DeleteConnection(id) => {
+            let deleted_name = app
+                .connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .map(|connection| connection.name.clone())
+                .unwrap_or_else(|| format!("Connection #{id}"));
+
+            match app.database.delete_connection(id) {
+                Ok(()) => {
+                    app.reload_data();
+                    app.context_menu = None;
+                    app.log(format!("Deleted connection: {deleted_name}"));
+                }
+                Err(error) => {
+                    app.log(format!("Failed to delete connection: {error}"));
+                }
+            }
+        }
         Message::NewConnection => {
             app.drawer = Some(DrawerState::Connection(ConnectionEditor::new()));
-            app.active_connection_context = None;
-            app.active_connection_context_position = None;
+            app.context_menu = None;
         }
         Message::EditConnection(id) => {
-            if let Some(connection) = app.connections.iter().find(|connection| connection.id == id) {
-                app.drawer = Some(DrawerState::Connection(ConnectionEditor::from_connection(connection)));
-                app.active_connection_context = None;
-                app.active_connection_context_position = None;
+            if let Some(connection) = app
+                .connections
+                .iter()
+                .find(|connection| connection.id == id)
+            {
+                app.drawer = Some(DrawerState::Connection(ConnectionEditor::from_connection(
+                    connection,
+                )));
+                app.context_menu = None;
             }
         }
         Message::OpenSftpConnection(id) => return app.open_sftp_from_connection(id),
@@ -454,12 +469,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::NewKey => {
             app.drawer = Some(DrawerState::Key(KeyEditor::new()));
-            app.active_key_context = None;
+            app.context_menu = None;
         }
         Message::EditKey(id) => {
             if let Some(key) = app.keys.iter().find(|key| key.id == id) {
                 app.drawer = Some(DrawerState::Key(KeyEditor::from_key(key)));
-                app.active_key_context = None;
+                app.context_menu = None;
             }
         }
         Message::KeyFieldChanged(field, value) => {
@@ -504,14 +519,14 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::NewIdentity => {
             app.drawer = Some(DrawerState::Identity(IdentityEditor::new()));
-            app.active_identity_context = None;
+            app.context_menu = None;
         }
         Message::EditIdentity(id) => {
             if let Some(identity) = app.identities.iter().find(|identity| identity.id == id) {
                 app.drawer = Some(DrawerState::Identity(IdentityEditor::from_identity(
                     identity,
                 )));
-                app.active_identity_context = None;
+                app.context_menu = None;
             }
         }
         Message::IdentityFieldChanged(field, value) => {
@@ -654,28 +669,34 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 Message::PortForwardStarted(id, result)
             });
         }
-        Message::PortForwardStarted(id, result) => {
-            match result {
-                Ok(handle) => {
-                    app.port_forward_runtimes.insert(id, handle);
-                    if let Some(forward) = app.port_forwards.iter_mut().find(|forward| forward.id == id) {
-                        forward.enabled = true;
-                        let mut updated = forward.clone();
-                        let _ = app.database.save_port_forward(&mut updated);
-                    }
-                    app.reload_data();
+        Message::PortForwardStarted(id, result) => match result {
+            Ok(handle) => {
+                app.port_forward_runtimes.insert(id, handle);
+                if let Some(forward) = app
+                    .port_forwards
+                    .iter_mut()
+                    .find(|forward| forward.id == id)
+                {
+                    forward.enabled = true;
+                    let mut updated = forward.clone();
+                    let _ = app.database.save_port_forward(&mut updated);
                 }
-                Err(error) => {
-                    app.log(format!("端口转发启动失败: {error}"));
-                    if let Some(forward) = app.port_forwards.iter_mut().find(|forward| forward.id == id) {
-                        forward.enabled = false;
-                        let mut updated = forward.clone();
-                        let _ = app.database.save_port_forward(&mut updated);
-                    }
-                    app.reload_data();
-                }
+                app.reload_data();
             }
-        }
+            Err(error) => {
+                app.log(format!("端口转发启动失败: {error}"));
+                if let Some(forward) = app
+                    .port_forwards
+                    .iter_mut()
+                    .find(|forward| forward.id == id)
+                {
+                    forward.enabled = false;
+                    let mut updated = forward.clone();
+                    let _ = app.database.save_port_forward(&mut updated);
+                }
+                app.reload_data();
+            }
+        },
         Message::SftpConnected(id, result) => {
             if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
                 if let TabWorkspace::Sftp(sftp) = &mut tab.workspace {
@@ -797,11 +818,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
         }
         Message::CloseDrawer => {
             app.drawer = None;
-            app.active_connection_context = None;
-            app.active_connection_context_position = None;
+            app.context_menu = None;
             app.active_group_context = None;
-            app.active_key_context = None;
-            app.active_identity_context = None;
             app.active_port_forward_context = None;
         }
         Message::ConnectConnection(id) => return app.open_terminal_from_connection(id),

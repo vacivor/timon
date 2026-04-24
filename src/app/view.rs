@@ -1401,6 +1401,7 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
     let terminal_theme = app.terminal_theme(&tab.theme_id);
     let composer_editor_theme = terminal_theme.clone();
     let composer_area_theme = terminal_theme.clone();
+    let composer_is_multiline = tab.composer.line_count() > 1;
     let composer_content: Element<'_, Message> = suppress_text_editor_ime_preedit(
         text_editor(&tab.composer)
             .id(terminal_composer_id(id))
@@ -1426,6 +1427,32 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
                             Message::SubmitTerminalComposer(id),
                         ))
                     }
+                } else if !composer_is_multiline
+                    && !keypress.modifiers.shift()
+                    && !keypress.modifiers.control()
+                    && !keypress.modifiers.alt()
+                    && !keypress.modifiers.command()
+                    && matches!(
+                        keypress.key,
+                        keyboard::Key::Named(keyboard::key::Named::ArrowUp)
+                    )
+                {
+                    Some(iced::widget::text_editor::Binding::Custom(
+                        Message::TerminalComposerHistoryPrev(id),
+                    ))
+                } else if !composer_is_multiline
+                    && !keypress.modifiers.shift()
+                    && !keypress.modifiers.control()
+                    && !keypress.modifiers.alt()
+                    && !keypress.modifiers.command()
+                    && matches!(
+                        keypress.key,
+                        keyboard::Key::Named(keyboard::key::Named::ArrowDown)
+                    )
+                {
+                    Some(iced::widget::text_editor::Binding::Custom(
+                        Message::TerminalComposerHistoryNext(id),
+                    ))
                 } else {
                     iced::widget::text_editor::Binding::from_key_press(keypress)
                 }

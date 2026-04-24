@@ -67,9 +67,88 @@ pub(crate) struct TerminalTab {
     pub(crate) workspace: TabWorkspace,
     pub(crate) terminal: TerminalView,
     pub(crate) composer: text_editor::Content,
+    pub(crate) composer_history: Vec<String>,
+    pub(crate) composer_history_index: Option<usize>,
+    pub(crate) composer_history_draft: String,
     pub(crate) selection_anchor: Option<TerminalPoint>,
     pub(crate) selection: Option<TerminalSelection>,
     pub(crate) session: Option<SessionHandle>,
+}
+
+impl TerminalTab {
+    pub(crate) fn set_composer_text(&mut self, value: &str) {
+        self.composer = text_editor::Content::with_text(value);
+        let last_line = self.composer.line_count().saturating_sub(1);
+        let last_column = self
+            .composer
+            .line(last_line)
+            .map(|line| line.text.chars().count())
+            .unwrap_or(0);
+        self.composer.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: last_line,
+                column: last_column,
+            },
+            selection: None,
+        });
+    }
+
+    pub(crate) fn reset_composer_history_navigation(&mut self) {
+        self.composer_history_index = None;
+        self.composer_history_draft.clear();
+    }
+
+    pub(crate) fn push_composer_history(&mut self, value: &str) {
+        if value.is_empty() {
+            return;
+        }
+
+        self.composer_history.push(value.to_string());
+        if self.composer_history.len() > TERMINAL_COMPOSER_HISTORY_LIMIT {
+            let overflow = self.composer_history.len() - TERMINAL_COMPOSER_HISTORY_LIMIT;
+            self.composer_history.drain(0..overflow);
+        }
+        self.reset_composer_history_navigation();
+    }
+
+    pub(crate) fn composer_history_prev(&mut self) -> bool {
+        if self.composer_history.is_empty() {
+            return false;
+        }
+
+        let next_index = match self.composer_history_index {
+            Some(0) => 0,
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.composer_history_draft = self.composer.text();
+                self.composer_history.len() - 1
+            }
+        };
+
+        self.composer_history_index = Some(next_index);
+        let value = self.composer_history[next_index].clone();
+        self.set_composer_text(&value);
+        true
+    }
+
+    pub(crate) fn composer_history_next(&mut self) -> bool {
+        let Some(index) = self.composer_history_index else {
+            return false;
+        };
+
+        if index + 1 >= self.composer_history.len() {
+            let draft = self.composer_history_draft.clone();
+            self.set_composer_text(&draft);
+            self.reset_composer_history_navigation();
+        } else {
+            let next_index = index + 1;
+            self.composer_history_index = Some(next_index);
+            let value = self.composer_history[next_index].clone();
+            self.set_composer_text(&value);
+        }
+
+        true
+    }
 }
 
 pub(crate) enum TabWorkspace {
@@ -276,6 +355,8 @@ pub(crate) enum Message {
     TerminalResized(u64, usize, usize),
     TerminalPaste(u64, Option<String>),
     TerminalComposerAction(u64, text_editor::Action),
+    TerminalComposerHistoryPrev(u64),
+    TerminalComposerHistoryNext(u64),
     SubmitTerminalComposer(u64),
     OpenConnectionContext(i64),
     OpenKeyContext(i64),
@@ -685,6 +766,9 @@ impl App {
             workspace: TabWorkspace::Terminal,
             terminal,
             composer: text_editor::Content::new(),
+            composer_history: Vec::new(),
+            composer_history_index: None,
+            composer_history_draft: String::new(),
             selection_anchor: None,
             selection: None,
             session: None,
@@ -752,6 +836,9 @@ impl App {
             }),
             terminal: TerminalView::new(cols, rows, &self.settings.terminal),
             composer: text_editor::Content::new(),
+            composer_history: Vec::new(),
+            composer_history_index: None,
+            composer_history_draft: String::new(),
             selection_anchor: None,
             selection: None,
             session: None,

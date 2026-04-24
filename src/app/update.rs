@@ -300,8 +300,27 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::TerminalComposerAction(id, action) => {
             if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
                 app.terminal_composer_focus = Some(id);
+                if action.is_edit() {
+                    tab.reset_composer_history_navigation();
+                }
                 tab.composer.perform(action);
                 if app.active_tab == ActiveTab::Terminal(id) {
+                    app.resize_terminals();
+                }
+            }
+        }
+        Message::TerminalComposerHistoryPrev(id) => {
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                app.terminal_composer_focus = Some(id);
+                if tab.composer_history_prev() && app.active_tab == ActiveTab::Terminal(id) {
+                    app.resize_terminals();
+                }
+            }
+        }
+        Message::TerminalComposerHistoryNext(id) => {
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                app.terminal_composer_focus = Some(id);
+                if tab.composer_history_next() && app.active_tab == ActiveTab::Terminal(id) {
                     app.resize_terminals();
                 }
             }
@@ -312,15 +331,18 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 let payload = command.trim_end_matches('\n').trim_end_matches('\r');
 
                 if !payload.trim().is_empty() {
+                    tab.push_composer_history(payload);
                     if let Some(session) = &tab.session {
                         let mut bytes = tab.terminal.encode_text_input(payload);
                         bytes.push(b'\r');
                         tab.terminal.scroll_to_bottom();
                         let _ = session.command_tx.send(SessionCommand::Input(bytes));
                     }
+                } else {
+                    tab.reset_composer_history_navigation();
                 }
 
-                tab.composer = text_editor::Content::new();
+                tab.set_composer_text("");
                 app.terminal_composer_focus = Some(id);
                 if app.active_tab == ActiveTab::Terminal(id) {
                     app.resize_terminals();

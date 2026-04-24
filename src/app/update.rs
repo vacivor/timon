@@ -246,6 +246,26 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 tab.selection = Some(normalize_selection(anchor, point));
             }
         }
+        Message::TerminalSelectionWord(id, selection) => {
+            app.active_tab = ActiveTab::Terminal(id);
+            app.terminal_focus = Some(id);
+            app.terminal_composer_focus = None;
+
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                tab.selection_anchor = Some(selection.start);
+                tab.selection = Some(selection);
+            }
+        }
+        Message::TerminalSelectionToken(id, selection) => {
+            app.active_tab = ActiveTab::Terminal(id);
+            app.terminal_focus = Some(id);
+            app.terminal_composer_focus = None;
+
+            if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
+                tab.selection_anchor = Some(selection.start);
+                tab.selection = Some(selection);
+            }
+        }
         Message::TerminalScrolled(id, lines, point) => {
             if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
                 tab.terminal.handle_scroll(lines, point);

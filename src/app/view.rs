@@ -1382,6 +1382,12 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
             TerminalCanvasEvent::SelectionUpdated(point) => {
                 Message::TerminalSelectionUpdated(id, point)
             }
+            TerminalCanvasEvent::SelectionWord(selection) => {
+                Message::TerminalSelectionWord(id, selection)
+            }
+            TerminalCanvasEvent::SelectionToken(selection) => {
+                Message::TerminalSelectionToken(id, selection)
+            }
             TerminalCanvasEvent::Scrolled { lines, point } => {
                 Message::TerminalScrolled(id, lines, point)
             }
@@ -1392,48 +1398,56 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
 
     let composer_height = app
         .terminal_composer_editor_height(app.terminal_composer_visual_lines(&tab.composer.text()));
-    let composer_content: Element<'_, Message> = text_editor(&tab.composer)
-        .id(terminal_composer_id(id))
-        .placeholder("Type a command...")
-        .on_action(move |action| Message::TerminalComposerAction(id, action))
-        .font(app.terminal_font().iced_font())
-        .key_binding(move |keypress| {
-            if !matches!(
-                keypress.status,
-                iced::widget::text_editor::Status::Focused { .. }
-            ) {
-                return None;
-            }
-
-            if matches!(
-                keypress.key,
-                keyboard::Key::Named(keyboard::key::Named::Enter)
-            ) {
-                if keypress.modifiers.shift() {
-                    Some(iced::widget::text_editor::Binding::Enter)
-                } else {
-                    Some(iced::widget::text_editor::Binding::Custom(
-                        Message::SubmitTerminalComposer(id),
-                    ))
+    let terminal_theme = app.terminal_theme(&tab.theme_id);
+    let composer_editor_theme = terminal_theme.clone();
+    let composer_area_theme = terminal_theme.clone();
+    let composer_content: Element<'_, Message> = suppress_text_editor_ime_preedit(
+        text_editor(&tab.composer)
+            .id(terminal_composer_id(id))
+            .placeholder("Type a command...")
+            .on_action(move |action| Message::TerminalComposerAction(id, action))
+            .font(app.terminal_font().iced_font())
+            .key_binding(move |keypress| {
+                if !matches!(
+                    keypress.status,
+                    iced::widget::text_editor::Status::Focused { .. }
+                ) {
+                    return None;
                 }
-            } else {
-                iced::widget::text_editor::Binding::from_key_press(keypress)
-            }
-        })
-        .height(Length::Fixed(composer_height))
-        .size(TERMINAL_COMPOSER_FONT_SIZE)
-        .line_height(iced::Pixels(TERMINAL_COMPOSER_LINE_HEIGHT))
-        .padding([
-            TERMINAL_COMPOSER_INNER_PADDING_Y,
-            TERMINAL_COMPOSER_INNER_PADDING_X,
-        ])
-        .style(terminal_composer_style)
-        .into();
 
-    let composer = container(container(composer_content).width(Length::Fill)).padding([
-        TERMINAL_COMPOSER_PADDING_Y,
-        TERMINAL_COMPOSER_HORIZONTAL_PADDING,
-    ]);
+                if matches!(
+                    keypress.key,
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                ) {
+                    if keypress.modifiers.shift() {
+                        Some(iced::widget::text_editor::Binding::Enter)
+                    } else {
+                        Some(iced::widget::text_editor::Binding::Custom(
+                            Message::SubmitTerminalComposer(id),
+                        ))
+                    }
+                } else {
+                    iced::widget::text_editor::Binding::from_key_press(keypress)
+                }
+            })
+            .height(Length::Fixed(composer_height))
+            .size(TERMINAL_COMPOSER_FONT_SIZE)
+            .line_height(iced::Pixels(TERMINAL_COMPOSER_LINE_HEIGHT))
+            .padding([
+                TERMINAL_COMPOSER_INNER_PADDING_Y,
+                TERMINAL_COMPOSER_INNER_PADDING_X,
+            ])
+            .style(move |theme, status| {
+                terminal_composer_style(&composer_editor_theme, theme, status)
+            }),
+    );
+
+    let composer = container(container(composer_content).width(Length::Fill))
+        .padding([
+            TERMINAL_COMPOSER_PADDING_Y,
+            TERMINAL_COMPOSER_HORIZONTAL_PADDING,
+        ])
+        .style(move |_| terminal_composer_area_style(&composer_area_theme));
 
     container(column![
         container(terminal).width(Length::Fill).height(Length::Fill),

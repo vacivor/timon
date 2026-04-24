@@ -12,6 +12,7 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor,
 use bytemuck::{Pod, Zeroable};
 use iced::advanced::graphics::text as graphics_text;
 use iced::advanced::layout::{self, Layout};
+use iced::advanced::mouse::{Click as MouseClick, click::Kind as ClickKind};
 use iced::advanced::renderer as advanced_renderer;
 use iced::advanced::widget::tree;
 use iced::advanced::widget::{Tree, Widget};
@@ -134,6 +135,8 @@ pub struct TerminalPoint {
 pub enum TerminalCanvasEvent {
     SelectionStarted(TerminalPoint),
     SelectionUpdated(TerminalPoint),
+    SelectionWord(TerminalSelection),
+    SelectionToken(TerminalSelection),
     Scrolled { lines: i32, point: TerminalPoint },
     Resized { cols: usize, rows: usize },
 }
@@ -141,6 +144,8 @@ pub enum TerminalCanvasEvent {
 pub struct TerminalAtlasState {
     dragging: bool,
     last_point: Option<TerminalPoint>,
+    last_click: Option<MouseClick>,
+    drag_click: Option<ClickKind>,
     cursor_visible: bool,
     cursor_blink_started_at: Instant,
     last_cursor_key: Option<CursorBlinkKey>,
@@ -152,6 +157,8 @@ impl Default for TerminalAtlasState {
         Self {
             dragging: false,
             last_point: None,
+            last_click: None,
+            drag_click: None,
             cursor_visible: true,
             cursor_blink_started_at: Instant::now(),
             last_cursor_key: None,
@@ -594,6 +601,14 @@ impl<Message: 'static> TerminalAtlas<Message> {
 
         (cols.max(2), rows.max(2))
     }
+
+    fn word_selection_at(&self, point: TerminalPoint) -> TerminalSelection {
+        word_selection_at(&self.snapshot, point)
+    }
+
+    fn token_selection_at(&self, point: TerminalPoint) -> TerminalSelection {
+        token_selection_at(&self.snapshot, point)
+    }
 }
 
 impl<Message, Theme, RendererType> Widget<Message, Theme, RendererType> for TerminalAtlas<Message>
@@ -701,17 +716,40 @@ where
                 let Some(terminal_point) = self.point_at(bounds, point) else {
                     return;
                 };
-
-                state.dragging = true;
-                state.last_point = Some(terminal_point);
+                let click = MouseClick::new(point, mouse::Button::Left, state.last_click);
+                state.last_click = Some(click);
+                state.drag_click = Some(click.kind());
                 state.cursor_visible = true;
                 state.cursor_blink_started_at = Instant::now();
-                shell.publish((self.on_event)(TerminalCanvasEvent::SelectionStarted(
-                    terminal_point,
-                )));
+
+                match click.kind() {
+                    ClickKind::Double => {
+                        state.dragging = false;
+                        state.last_point = None;
+                        shell.publish((self.on_event)(TerminalCanvasEvent::SelectionWord(
+                            self.word_selection_at(terminal_point),
+                        )));
+                    }
+                    ClickKind::Triple => {
+                        state.dragging = false;
+                        state.last_point = None;
+                        shell.publish((self.on_event)(TerminalCanvasEvent::SelectionToken(
+                            self.token_selection_at(terminal_point),
+                        )));
+                    }
+                    ClickKind::Single => {
+                        state.dragging = true;
+                        state.last_point = Some(terminal_point);
+                        shell.publish((self.on_event)(TerminalCanvasEvent::SelectionStarted(
+                            terminal_point,
+                        )));
+                    }
+                }
                 shell.capture_event();
             }
-            IcedEvent::Mouse(mouse::Event::CursorMoved { .. }) if state.dragging => {
+            IcedEvent::Mouse(mouse::Event::CursorMoved { .. })
+                if state.dragging && state.drag_click == Some(ClickKind::Single) =>
+            {
                 let Some(point) = cursor.position_from(Point::new(bounds.x, bounds.y)) else {
                     return;
                 };
@@ -733,7 +771,11 @@ where
             {
                 state.dragging = false;
                 state.last_point = None;
+                state.drag_click = None;
                 shell.capture_event();
+            }
+            IcedEvent::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.drag_click = None;
             }
             IcedEvent::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let Some(_point) = cursor.position_in(bounds) else {
@@ -2280,6 +2322,101 @@ fn selection_contains(selection: Option<&TerminalSelection>, cell: &TerminalCell
     cell_end >= selection_start && cell_start <= selection_end
 }
 
+fn word_selection_at(snapshot: &TerminalSnapshot, point: TerminalPoint) -> TerminalSelection {
+    selection_at(snapshot, point, word_cell_class)
+}
+
+fn token_selection_at(snapshot: &TerminalSnapshot, point: TerminalPoint) -> TerminalSelection {
+    selection_at(snapshot, point, token_cell_class)
+}
+
+fn selection_at(
+    snapshot: &TerminalSnapshot,
+    point: TerminalPoint,
+    classify: fn(&TerminalCell) -> WordCellClass,
+) -> TerminalSelection {
+    let Some(cell_index) = snapshot.cells.iter().position(|cell| {
+        cell.line == point.line
+            && cell.column <= point.column
+            && point.column < cell.column + cell.width.max(1)
+    }) else {
+        return TerminalSelection {
+            start: point,
+            end: point,
+        };
+    };
+
+    let cell = &snapshot.cells[cell_index];
+    let class = classify(cell);
+    let mut start = TerminalPoint {
+        line: cell.line,
+        column: cell.column,
+    };
+    let mut end = TerminalPoint {
+        line: cell.line,
+        column: cell.column + cell.width.max(1) - 1,
+    };
+
+    for candidate in snapshot.cells[..cell_index].iter().rev() {
+        if candidate.line != cell.line
+            || candidate.column + candidate.width.max(1) != start.column
+            || classify(candidate) != class
+        {
+            break;
+        }
+
+        start.column = candidate.column;
+    }
+
+    for candidate in snapshot.cells[cell_index + 1..].iter() {
+        if candidate.line != cell.line
+            || candidate.column != end.column + 1
+            || classify(candidate) != class
+        {
+            break;
+        }
+
+        end.column = candidate.column + candidate.width.max(1) - 1;
+    }
+
+    TerminalSelection { start, end }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordCellClass {
+    Word,
+    Whitespace,
+    Symbol,
+}
+
+fn word_cell_class(cell: &TerminalCell) -> WordCellClass {
+    if cell.text.chars().all(char::is_whitespace) {
+        WordCellClass::Whitespace
+    } else if cell.text.chars().all(is_plain_word_char) {
+        WordCellClass::Word
+    } else {
+        WordCellClass::Symbol
+    }
+}
+
+fn token_cell_class(cell: &TerminalCell) -> WordCellClass {
+    if cell.text.chars().all(char::is_whitespace) {
+        WordCellClass::Whitespace
+    } else if cell.text.chars().all(is_terminal_word_char) {
+        WordCellClass::Word
+    } else {
+        WordCellClass::Symbol
+    }
+}
+
+fn is_plain_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '-'
+}
+
+fn is_terminal_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\' | '@' | '~' | ':')
+}
+
 fn resolve_terminal_font(family_name: &str) -> iced::Font {
     let trimmed = family_name.trim();
 
@@ -2667,5 +2804,339 @@ mod tests {
         assert!(!terminal.term.mode().contains(TermMode::ALT_SCREEN));
         assert_eq!(snapshot_line_text(&snapshot, 0).trim_end(), "main");
         assert!(!snapshot_line_text(&snapshot, 0).contains("alt"));
+    }
+
+    #[test]
+    fn word_selection_expands_to_plain_word_boundaries() {
+        let snapshot = TerminalSnapshot {
+            cells: vec![
+                TerminalCell {
+                    text: "h".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 0,
+                },
+                TerminalCell {
+                    text: "o".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 1,
+                },
+                TerminalCell {
+                    text: "s".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 2,
+                },
+                TerminalCell {
+                    text: "t".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 3,
+                },
+                TerminalCell {
+                    text: ":".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 4,
+                },
+                TerminalCell {
+                    text: " ".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 5,
+                },
+                TerminalCell {
+                    text: "/".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 6,
+                },
+                TerminalCell {
+                    text: "t".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 7,
+                },
+                TerminalCell {
+                    text: "m".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 8,
+                },
+                TerminalCell {
+                    text: "p".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 9,
+                },
+            ],
+            cursor_line: 0,
+            cursor_column: 0,
+            cursor_width: 1,
+            cursor_shape: CursorShape::Block,
+            show_cursor: false,
+            cursor_blinking: false,
+            background: Color::WHITE,
+            cursor_color: Color::BLACK,
+            cursor_text: Color::WHITE,
+            selection_background: Color::from_rgb8(180, 213, 255),
+            selection_foreground: Color::BLACK,
+        };
+
+        let host = word_selection_at(&snapshot, TerminalPoint { line: 0, column: 2 });
+        assert_eq!(host.start.column, 0);
+        assert_eq!(host.end.column, 3);
+
+        let separator = word_selection_at(&snapshot, TerminalPoint { line: 0, column: 4 });
+        assert_eq!(separator.start.column, 4);
+        assert_eq!(separator.end.column, 4);
+
+        let path = word_selection_at(&snapshot, TerminalPoint { line: 0, column: 7 });
+        assert_eq!(path.start.column, 7);
+        assert_eq!(path.end.column, 9);
+    }
+
+    #[test]
+    fn token_selection_expands_to_terminal_token_boundaries() {
+        let snapshot = TerminalSnapshot {
+            cells: vec![
+                TerminalCell {
+                    text: "h".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 0,
+                },
+                TerminalCell {
+                    text: "o".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 1,
+                },
+                TerminalCell {
+                    text: "s".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 2,
+                },
+                TerminalCell {
+                    text: "t".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 3,
+                },
+                TerminalCell {
+                    text: ":".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 4,
+                },
+                TerminalCell {
+                    text: " ".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 5,
+                },
+                TerminalCell {
+                    text: "/".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 6,
+                },
+                TerminalCell {
+                    text: "t".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 7,
+                },
+                TerminalCell {
+                    text: "m".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 8,
+                },
+                TerminalCell {
+                    text: "p".into(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column: 9,
+                },
+            ],
+            cursor_line: 0,
+            cursor_column: 0,
+            cursor_width: 1,
+            cursor_shape: CursorShape::Block,
+            show_cursor: false,
+            cursor_blinking: false,
+            background: Color::WHITE,
+            cursor_color: Color::BLACK,
+            cursor_text: Color::WHITE,
+            selection_background: Color::from_rgb8(180, 213, 255),
+            selection_foreground: Color::BLACK,
+        };
+
+        let path = token_selection_at(&snapshot, TerminalPoint { line: 0, column: 7 });
+        assert_eq!(path.start.column, 6);
+        assert_eq!(path.end.column, 9);
     }
 }

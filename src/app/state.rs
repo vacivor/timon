@@ -270,6 +270,8 @@ pub(crate) enum Message {
     CloseTerminal(u64),
     TerminalSelectionStarted(u64, TerminalPoint),
     TerminalSelectionUpdated(u64, TerminalPoint),
+    TerminalSelectionWord(u64, TerminalSelection),
+    TerminalSelectionToken(u64, TerminalSelection),
     TerminalScrolled(u64, i32, TerminalPoint),
     TerminalResized(u64, usize, usize),
     TerminalPaste(u64, Option<String>),

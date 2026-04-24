@@ -662,25 +662,40 @@ pub(crate) fn text_editor_field_style(
     }
 }
 
+pub(crate) fn terminal_composer_area_style(theme: &TerminalTheme) -> container::Style {
+    container::Style {
+        text_color: Some(theme.foreground),
+        background: Some(Background::Color(theme.background)),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn terminal_composer_style(
+    terminal_theme: &TerminalTheme,
     _theme: &Theme,
     status: iced::widget::text_editor::Status,
 ) -> iced::widget::text_editor::Style {
     let border_color = match status {
-        iced::widget::text_editor::Status::Focused { .. } => color_focus(),
-        iced::widget::text_editor::Status::Hovered => color_text_secondary(),
-        _ => color_ring_subtle(),
+        iced::widget::text_editor::Status::Focused { .. } => terminal_theme.cursor_color,
+        iced::widget::text_editor::Status::Hovered => {
+            mix_color(terminal_theme.foreground, terminal_theme.background, 0.42)
+        }
+        _ => mix_color(terminal_theme.foreground, terminal_theme.background, 0.72),
     };
 
     iced::widget::text_editor::Style {
-        background: Background::Color(color_surface_elevated()),
+        background: Background::Color(mix_color(
+            terminal_theme.background,
+            terminal_theme.foreground,
+            0.05,
+        )),
         border: Border {
             color: border_color,
             width: 1.0,
             radius: 10.0.into(),
         },
-        placeholder: color_text_faint(),
-        value: color_text_primary(),
-        selection: Color::from_rgb8(225, 238, 255),
+        placeholder: mix_color(terminal_theme.foreground, terminal_theme.background, 0.52),
+        value: terminal_theme.foreground,
+        selection: with_alpha(terminal_theme.cursor_color, 0.18),
     }
 }

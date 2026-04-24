@@ -1,3 +1,4 @@
+use std::env;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{
@@ -319,6 +320,7 @@ fn connect_local_session(
     command.env("COLORTERM", "truecolor");
     command.env("TERM_PROGRAM", "Timon");
     command.env("SHELL", &shell);
+    apply_utf8_locale(&mut command);
 
     if Path::new(&work_dir).is_dir() {
         command.cwd(&work_dir);
@@ -398,6 +400,26 @@ fn connect_local_session(
     });
 
     Ok(SessionHandle { command_tx })
+}
+
+fn apply_utf8_locale(command: &mut CommandBuilder) {
+    let lang = env::var("LANG")
+        .ok()
+        .filter(|value| value.to_ascii_uppercase().contains("UTF-8"))
+        .unwrap_or_else(|| "en_US.UTF-8".into());
+    let lc_ctype = env::var("LC_CTYPE")
+        .ok()
+        .filter(|value| value.to_ascii_uppercase().contains("UTF-8"))
+        .unwrap_or_else(|| lang.clone());
+
+    command.env("LANG", &lang);
+    command.env("LC_CTYPE", &lc_ctype);
+
+    if let Ok(lc_all) = env::var("LC_ALL") {
+        if lc_all.to_ascii_uppercase().contains("UTF-8") {
+            command.env("LC_ALL", &lc_all);
+        }
+    }
 }
 
 #[cfg(unix)]

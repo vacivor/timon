@@ -76,11 +76,18 @@ jobs:
       - name: Build macOS pkg
         run: make ${{ matrix.make_pkg_target }}
 
+      - name: Stage macOS app artifact
+        run: |
+          ARTIFACT_DIR="dist/artifacts/${{ matrix.archive }}-app"
+          rm -rf "${ARTIFACT_DIR}"
+          mkdir -p "${ARTIFACT_DIR}"
+          ditto "dist/macos/${{ matrix.target }}/Timon.app" "${ARTIFACT_DIR}/Timon.app"
+
       - name: Upload macOS app
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive }}-app
-          path: dist/${{ matrix.archive }}.app.zip
+          path: dist/artifacts/${{ matrix.archive }}-app
 
       - name: Upload macOS pkg
         uses: actions/upload-artifact@v4

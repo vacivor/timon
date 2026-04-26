@@ -290,7 +290,7 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
 
                 match tab.connection_type {
                     ConnectionType::Local => {
-                        if let Some(target) = local_open_target(&token) {
+                        if let Some(target) = local_open_target_with_base(&token, &tab.work_dir) {
                             if let Err(error) = open_external_target(&target) {
                                 app.log(format!("打开目标失败 {target}: {error}"));
                             }

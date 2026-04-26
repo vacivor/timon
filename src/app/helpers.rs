@@ -241,37 +241,101 @@ pub(crate) fn is_supported_remote_url(value: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
-pub(crate) fn local_open_target(value: &str) -> Option<String> {
+pub(crate) fn local_open_target_with_base(value: &str, base_dir: &str) -> Option<String> {
     if is_supported_remote_url(value) {
         return Some(value.to_string());
     }
 
     if let Some(rest) = value.strip_prefix("file://") {
-        return resolve_local_open_path(rest);
+        return resolve_local_open_path(&percent_decode_path(rest), base_dir);
     }
 
-    resolve_local_open_path(value)
+    resolve_local_open_path(value, base_dir)
 }
 
-fn resolve_local_open_path(value: &str) -> Option<String> {
+fn resolve_local_open_path(value: &str, base_dir: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    let expanded = if let Some(home_relative) = trimmed.strip_prefix("~/") {
+    #[cfg(unix)]
+    let path_value = unescape_shell_path(trimmed);
+    #[cfg(not(unix))]
+    let path_value = trimmed.to_string();
+
+    let expanded = if let Some(home_relative) = path_value.strip_prefix("~/") {
         std::env::var("HOME")
             .ok()
             .map(|home| std::path::PathBuf::from(home).join(home_relative))
-    } else if trimmed == "~" {
+    } else if path_value == "~" {
         std::env::var("HOME").ok().map(std::path::PathBuf::from)
     } else {
-        Some(std::path::PathBuf::from(trimmed))
+        let path = std::path::PathBuf::from(&path_value);
+        if path.is_absolute() {
+            Some(path)
+        } else {
+            let base = base_dir.trim();
+            if !base.is_empty() && std::path::Path::new(base).is_dir() {
+                Some(std::path::PathBuf::from(base).join(path))
+            } else {
+                Some(path)
+            }
+        }
     }?;
 
     expanded
         .exists()
         .then(|| expanded.to_string_lossy().to_string())
+}
+
+#[cfg(unix)]
+fn unescape_shell_path(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+fn percent_decode_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                output.push((hi << 4) | lo);
+                index += 3;
+                continue;
+            }
+        }
+
+        output.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&output).to_string()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(crate) fn open_external_target(target: &str) -> std::io::Result<()> {

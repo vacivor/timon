@@ -2392,14 +2392,158 @@ fn clickable_selection_at(
     snapshot: &TerminalSnapshot,
     point: TerminalPoint,
 ) -> Option<TerminalSelection> {
-    let cell = snapshot.cells.iter().find(|cell| {
-        cell.line == point.line
-            && cell.column <= point.column
-            && point.column < cell.column + cell.width.max(1)
+    let mut cells = snapshot
+        .cells
+        .iter()
+        .filter(|cell| cell.line == point.line)
+        .collect::<Vec<_>>();
+    cells.sort_by_key(|cell| cell.column);
+
+    let clicked = cells.iter().position(|cell| {
+        cell.column <= point.column && point.column < cell.column + cell.width.max(1)
     })?;
 
-    (clickable_cell_class(cell) == WordCellClass::Word)
-        .then(|| selection_at(snapshot, point, clickable_cell_class))
+    for (start, end) in clickable_spans(&cells) {
+        if start <= clicked && clicked <= end {
+            return Some(TerminalSelection {
+                start: TerminalPoint {
+                    line: point.line,
+                    column: cells[start].column,
+                },
+                end: TerminalPoint {
+                    line: point.line,
+                    column: cells[end].column + cells[end].width.max(1) - 1,
+                },
+            });
+        }
+    }
+
+    None
+}
+
+fn clickable_spans(cells: &[&TerminalCell]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+
+    while index < cells.len() {
+        let Some(ch) = cell_char(cells[index]) else {
+            index += 1;
+            continue;
+        };
+
+        if is_quote_char(ch) {
+            let start = index;
+            let quote = ch;
+            index += 1;
+            let mut escaped = false;
+            while index < cells.len() {
+                let Some(current) = cell_char(cells[index]) else {
+                    break;
+                };
+                if current == quote && !escaped {
+                    break;
+                }
+                escaped = current == '\\' && !escaped;
+                if current != '\\' {
+                    escaped = false;
+                }
+                index += 1;
+            }
+            let end = index.min(cells.len().saturating_sub(1));
+            if end > start && is_clickable_span(cells, start, end) {
+                spans.push((start, end));
+            }
+            index = end + 1;
+            continue;
+        }
+
+        if !is_clickable_char(ch) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        let mut end = index;
+        index += 1;
+        while index < cells.len() {
+            let Some(current) = cell_char(cells[index]) else {
+                break;
+            };
+            if is_clickable_char(current)
+                || (current.is_whitespace() && cell_char(cells[end]) == Some('\\'))
+            {
+                end = index;
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        if is_clickable_span(cells, start, end) {
+            spans.push((start, end));
+        }
+    }
+
+    spans
+}
+
+fn is_clickable_span(cells: &[&TerminalCell], start: usize, end: usize) -> bool {
+    let text = clickable_span_text(cells, start, end);
+    let text = trim_clickable_span_text(&text);
+
+    is_url_like(text) || is_path_like(text)
+}
+
+fn clickable_span_text(cells: &[&TerminalCell], start: usize, end: usize) -> String {
+    cells[start..=end]
+        .iter()
+        .filter_map(|cell| cell_char(cell))
+        .collect()
+}
+
+fn trim_clickable_span_text(value: &str) -> &str {
+    value
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ','
+            )
+        })
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | '!' | '?'))
+}
+
+fn is_url_like(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file://")
+}
+
+fn is_path_like(value: &str) -> bool {
+    if value.starts_with('/')
+        || value.starts_with("~/")
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("\\\\")
+    {
+        return true;
+    }
+
+    if (value.contains('/') || value.contains('\\')) && !value.contains('=') {
+        return true;
+    }
+
+    let mut chars = value.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(drive), Some(':'), Some('/' | '\\')) if drive.is_ascii_alphabetic()
+    )
+}
+
+fn cell_char(cell: &TerminalCell) -> Option<char> {
+    cell.text.chars().next()
+}
+
+fn is_quote_char(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | '`')
 }
 
 fn selection_at(
@@ -2475,16 +2619,6 @@ fn token_cell_class(cell: &TerminalCell) -> WordCellClass {
     if cell.text.chars().all(char::is_whitespace) {
         WordCellClass::Whitespace
     } else if cell.text.chars().all(is_terminal_word_char) {
-        WordCellClass::Word
-    } else {
-        WordCellClass::Symbol
-    }
-}
-
-fn clickable_cell_class(cell: &TerminalCell) -> WordCellClass {
-    if cell.text.chars().all(char::is_whitespace) {
-        WordCellClass::Whitespace
-    } else if cell.text.chars().all(is_clickable_char) {
         WordCellClass::Word
     } else {
         WordCellClass::Symbol
@@ -2788,6 +2922,40 @@ mod tests {
             .collect::<Vec<_>>();
         cells.sort_by_key(|cell| cell.column);
         cells.into_iter().map(|cell| cell.text.as_str()).collect()
+    }
+
+    fn snapshot_from_text(text: &str) -> TerminalSnapshot {
+        TerminalSnapshot {
+            cells: text
+                .chars()
+                .enumerate()
+                .map(|(column, ch)| TerminalCell {
+                    text: ch.to_string(),
+                    fg: Color::BLACK,
+                    bg: Color::WHITE,
+                    underline: None,
+                    underline_color: Color::BLACK,
+                    width: 1,
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    hidden: false,
+                    line: 0,
+                    column,
+                })
+                .collect(),
+            cursor_line: 0,
+            cursor_column: 0,
+            cursor_width: 1,
+            cursor_shape: CursorShape::Block,
+            show_cursor: false,
+            cursor_blinking: false,
+            background: Color::WHITE,
+            cursor_color: Color::BLACK,
+            cursor_text: Color::WHITE,
+            selection_background: Color::from_rgb8(180, 213, 255),
+            selection_foreground: Color::BLACK,
+        }
     }
 
     #[test]
@@ -3228,5 +3396,76 @@ mod tests {
         let path = token_selection_at(&snapshot, TerminalPoint { line: 0, column: 7 });
         assert_eq!(path.start.column, 6);
         assert_eq!(path.end.column, 9);
+    }
+
+    #[test]
+    fn clickable_selection_includes_quoted_paths_with_spaces() {
+        let snapshot = snapshot_from_text(r#"open "/tmp/My File.txt""#);
+
+        let selection = clickable_selection_at(
+            &snapshot,
+            TerminalPoint {
+                line: 0,
+                column: 14,
+            },
+        )
+        .expect("quoted path should be clickable");
+
+        assert_eq!(selection.start.column, 5);
+        assert_eq!(selection.end.column, 22);
+    }
+
+    #[test]
+    fn clickable_selection_includes_shell_escaped_spaces() {
+        let snapshot = snapshot_from_text(r#"open /tmp/My\ File.txt"#);
+
+        let selection = clickable_selection_at(
+            &snapshot,
+            TerminalPoint {
+                line: 0,
+                column: 15,
+            },
+        )
+        .expect("escaped-space path should be clickable");
+
+        assert_eq!(selection.start.column, 5);
+        assert_eq!(selection.end.column, 21);
+    }
+
+    #[test]
+    fn clickable_selection_ignores_plain_words() {
+        let snapshot = snapshot_from_text("services redis image");
+
+        let selection = clickable_selection_at(&snapshot, TerminalPoint { line: 0, column: 2 });
+
+        assert!(selection.is_none());
+    }
+
+    #[test]
+    fn clickable_selection_accepts_urls() {
+        let snapshot = snapshot_from_text("see https://example.com/a?b=1");
+
+        let selection = clickable_selection_at(&snapshot, TerminalPoint { line: 0, column: 8 })
+            .expect("url should be clickable");
+
+        assert_eq!(selection.start.column, 4);
+        assert_eq!(selection.end.column, 28);
+    }
+
+    #[test]
+    fn clickable_selection_accepts_relative_paths_with_separators() {
+        let snapshot = snapshot_from_text("open src/main.rs");
+
+        let selection = clickable_selection_at(
+            &snapshot,
+            TerminalPoint {
+                line: 0,
+                column: 10,
+            },
+        )
+        .expect("relative path with separator should be clickable");
+
+        assert_eq!(selection.start.column, 5);
+        assert_eq!(selection.end.column, 15);
     }
 }

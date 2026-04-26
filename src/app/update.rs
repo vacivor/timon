@@ -72,6 +72,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 ..
             },
         ) => {
+            app.keyboard_modifiers = modifiers;
+
             if is_open_settings_shortcut(&app.settings.shortcuts, &key, physical_key, modifiers) {
                 return open_settings_window(app);
             }
@@ -172,6 +174,12 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
                 }
             }
         }
+        Message::KeyboardInput(_, keyboard::Event::KeyReleased { modifiers, .. }) => {
+            app.keyboard_modifiers = modifiers;
+        }
+        Message::KeyboardInput(_, keyboard::Event::ModifiersChanged(modifiers)) => {
+            app.keyboard_modifiers = modifiers;
+        }
         Message::InputMethod(id, input_method::Event::Commit(content)) => {
             if Some(id) == app.main_window {
                 if let Some(tab_id) = app.terminal_focus {
@@ -194,7 +202,6 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             }
         }
         Message::InputMethod(_, _) => {}
-        Message::KeyboardInput(_, _) => {}
         Message::DragWindow(id) => return window::drag(id),
         Message::SelectMenu(menu) => {
             app.selected_menu = menu;
@@ -264,6 +271,38 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(tab) = app.terminal_tabs.iter_mut().find(|tab| tab.id == id) {
                 tab.selection_anchor = Some(selection.start);
                 tab.selection = Some(selection);
+            }
+        }
+        Message::TerminalCommandClick(id, point) => {
+            if let Some(tab) = app.terminal_tabs.iter().find(|tab| tab.id == id) {
+                let theme = app.terminal_theme(&tab.theme_id);
+                let snapshot = tab.terminal.snapshot(&theme);
+                let Some(selection) = tab.terminal.token_selection_at_point(&theme, point) else {
+                    return Task::none();
+                };
+                let Some(token) = selection_contents(&snapshot, Some(&selection))
+                    .map(|value| normalize_clickable_token(&value))
+                    .filter(|value| !value.is_empty())
+                else {
+                    return Task::none();
+                };
+
+                match tab.connection_type {
+                    ConnectionType::Local => {
+                        if let Some(target) = local_open_target(&token) {
+                            if let Err(error) = open_external_target(&target) {
+                                app.log(format!("打开目标失败 {target}: {error}"));
+                            }
+                        }
+                    }
+                    ConnectionType::Ssh | ConnectionType::Serial => {
+                        if is_supported_remote_url(&token) {
+                            if let Err(error) = open_external_target(&token) {
+                                app.log(format!("打开网址失败 {token}: {error}"));
+                            }
+                        }
+                    }
+                }
             }
         }
         Message::TerminalScrolled(id, lines, point) => {

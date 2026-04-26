@@ -1375,6 +1375,7 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
         app.active_tab == ActiveTab::Terminal(id)
             && app.terminal_focus == Some(id)
             && app.terminal_composer_focus != Some(id),
+        app.keyboard_modifiers.command(),
         Arc::new(move |event| match event {
             TerminalCanvasEvent::SelectionStarted(point) => {
                 Message::TerminalSelectionStarted(id, point)
@@ -1388,6 +1389,7 @@ fn terminal_page_view(app: &App, id: u64) -> Element<'_, Message> {
             TerminalCanvasEvent::SelectionToken(selection) => {
                 Message::TerminalSelectionToken(id, selection)
             }
+            TerminalCanvasEvent::CommandClick(point) => Message::TerminalCommandClick(id, point),
             TerminalCanvasEvent::Scrolled { lines, point } => {
                 Message::TerminalScrolled(id, lines, point)
             }

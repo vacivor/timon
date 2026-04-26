@@ -137,6 +137,7 @@ pub enum TerminalCanvasEvent {
     SelectionUpdated(TerminalPoint),
     SelectionWord(TerminalSelection),
     SelectionToken(TerminalSelection),
+    CommandClick(TerminalPoint),
     Scrolled { lines: i32, point: TerminalPoint },
     Resized { cols: usize, rows: usize },
 }
@@ -187,6 +188,7 @@ pub struct TerminalAtlas<Message> {
     atlas: Arc<Mutex<GlyphAtlas>>,
     scale_factor: f32,
     focused: bool,
+    command_click: bool,
     on_event: Arc<dyn Fn(TerminalCanvasEvent) -> Message + Send + Sync>,
 }
 
@@ -368,6 +370,15 @@ impl TerminalView {
         (self.cols, self.rows)
     }
 
+    pub fn token_selection_at_point(
+        &self,
+        theme: &TerminalTheme,
+        point: TerminalPoint,
+    ) -> Option<TerminalSelection> {
+        let snapshot = self.snapshot(theme);
+        Some(token_selection_at(&snapshot, point))
+    }
+
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.cols = cols.max(2);
         self.rows = rows.max(2);
@@ -545,6 +556,7 @@ impl<Message> Clone for TerminalAtlas<Message> {
             atlas: self.atlas.clone(),
             scale_factor: self.scale_factor,
             focused: self.focused,
+            command_click: self.command_click,
             on_event: self.on_event.clone(),
         }
     }
@@ -558,6 +570,7 @@ impl<Message: 'static> TerminalAtlas<Message> {
         atlas: Arc<Mutex<GlyphAtlas>>,
         scale_factor: f32,
         focused: bool,
+        command_click: bool,
         on_event: Arc<dyn Fn(TerminalCanvasEvent) -> Message + Send + Sync>,
     ) -> Self {
         Self {
@@ -567,6 +580,7 @@ impl<Message: 'static> TerminalAtlas<Message> {
             atlas,
             scale_factor: scale_factor.max(1.0),
             focused,
+            command_click,
             on_event,
         }
     }
@@ -721,6 +735,16 @@ where
                 state.drag_click = Some(click.kind());
                 state.cursor_visible = true;
                 state.cursor_blink_started_at = Instant::now();
+
+                if self.command_click {
+                    state.dragging = false;
+                    state.last_point = None;
+                    shell.publish((self.on_event)(TerminalCanvasEvent::CommandClick(
+                        terminal_point,
+                    )));
+                    shell.capture_event();
+                    return;
+                }
 
                 match click.kind() {
                     ClickKind::Double => {

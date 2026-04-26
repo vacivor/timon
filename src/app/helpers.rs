@@ -223,6 +223,79 @@ pub(crate) fn selection_contents(
     Some(output)
 }
 
+pub(crate) fn normalize_clickable_token(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ','
+            )
+        })
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | '!' | '?'))
+        .to_string()
+}
+
+pub(crate) fn is_supported_remote_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+pub(crate) fn local_open_target(value: &str) -> Option<String> {
+    if is_supported_remote_url(value) {
+        return Some(value.to_string());
+    }
+
+    if let Some(rest) = value.strip_prefix("file://") {
+        return resolve_local_open_path(rest);
+    }
+
+    resolve_local_open_path(value)
+}
+
+fn resolve_local_open_path(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let expanded = if let Some(home_relative) = trimmed.strip_prefix("~/") {
+        std::env::var("HOME")
+            .ok()
+            .map(|home| std::path::PathBuf::from(home).join(home_relative))
+    } else if trimmed == "~" {
+        std::env::var("HOME").ok().map(std::path::PathBuf::from)
+    } else {
+        Some(std::path::PathBuf::from(trimmed))
+    }?;
+
+    expanded
+        .exists()
+        .then(|| expanded.to_string_lossy().to_string())
+}
+
+pub(crate) fn open_external_target(target: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(target).spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .spawn()?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(target).spawn()?;
+        Ok(())
+    }
+}
+
 pub(crate) fn cell_in_selection(
     selection: &TerminalSelection,
     line: usize,

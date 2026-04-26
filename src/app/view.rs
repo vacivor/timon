@@ -31,6 +31,9 @@ pub(crate) fn subscription(_app: &App) -> Subscription<Message> {
         time::every(Duration::from_millis(TICK_MS)).map(|_| Message::Tick),
         window::events().map(|(id, event)| Message::WindowEvent(id, event)),
         event::listen_with(|event, status, window| match (status, event) {
+            (_, iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers))) => Some(
+                Message::KeyboardInput(window, keyboard::Event::ModifiersChanged(modifiers)),
+            ),
             (_, iced::Event::Keyboard(key_event))
                 if matches!(
                     &key_event,

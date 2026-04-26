@@ -301,6 +301,7 @@ struct TerminalAtlasPipeline {
 struct TerminalAtlasPrimitive {
     snapshot: TerminalSnapshot,
     selection: Option<TerminalSelection>,
+    hover_selection: Option<TerminalSelection>,
     font: TerminalFont,
     atlas: Arc<Mutex<GlyphAtlas>>,
     scale_factor: f32,
@@ -370,13 +371,13 @@ impl TerminalView {
         (self.cols, self.rows)
     }
 
-    pub fn token_selection_at_point(
+    pub fn clickable_selection_at_point(
         &self,
         theme: &TerminalTheme,
         point: TerminalPoint,
     ) -> Option<TerminalSelection> {
         let snapshot = self.snapshot(theme);
-        Some(token_selection_at(&snapshot, point))
+        clickable_selection_at(&snapshot, point)
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
@@ -844,17 +845,27 @@ where
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_ref::<TerminalAtlasState>();
+        let bounds = layout.bounds();
         let mut snapshot = self.snapshot.clone();
         if !self.focused {
             snapshot.show_cursor = false;
         } else if snapshot.cursor_blinking && !state.cursor_visible {
             snapshot.show_cursor = false;
         }
+        let hover_selection = if self.command_click {
+            _cursor
+                .position_in(bounds)
+                .and_then(|point| self.point_at(bounds, point))
+                .and_then(|point| clickable_selection_at(&snapshot, point))
+        } else {
+            None
+        };
         renderer.draw_primitive(
-            layout.bounds(),
+            bounds,
             TerminalAtlasPrimitive {
                 snapshot,
                 selection: self.selection.clone(),
+                hover_selection,
                 font: self.font.clone(),
                 atlas: self.atlas.clone(),
                 scale_factor: self.scale_factor,
@@ -1274,6 +1285,7 @@ impl TerminalAtlasPipeline {
                     );
                 }
 
+                let hovered = selection_contains(primitive.hover_selection.as_ref(), cell);
                 if let Some(underline) = cell.underline {
                     append_underline_rects(
                         &mut rects,
@@ -1283,6 +1295,17 @@ impl TerminalAtlasPipeline {
                         (rect.2 - rect.0) as f32,
                         (rect.3 - rect.1) as f32,
                         cell.underline_color,
+                    );
+                }
+                if hovered {
+                    append_underline_rects(
+                        &mut rects,
+                        UnderlineStyle::Single,
+                        rect.0 as f32,
+                        rect.1 as f32,
+                        (rect.2 - rect.0) as f32,
+                        (rect.3 - rect.1) as f32,
+                        cell.fg,
                     );
                 }
 
@@ -1408,6 +1431,7 @@ impl ShaderPrimitive for TerminalAtlasPrimitive {
             &self.font,
             self.scale_factor,
             self.selection.as_ref(),
+            self.hover_selection.as_ref(),
             bounds.size(),
         );
         if pipeline.text_cache_key != Some(text_key) {
@@ -2072,6 +2096,7 @@ fn terminal_surface_cache_key(
     font: &TerminalFont,
     scale_factor: f32,
     selection: Option<&TerminalSelection>,
+    hover_selection: Option<&TerminalSelection>,
     size: Size,
 ) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2116,6 +2141,15 @@ fn terminal_surface_cache_key(
     }
 
     if let Some(selection) = selection {
+        selection.start.line.hash(&mut hasher);
+        selection.start.column.hash(&mut hasher);
+        selection.end.line.hash(&mut hasher);
+        selection.end.column.hash(&mut hasher);
+    } else {
+        0usize.hash(&mut hasher);
+    }
+
+    if let Some(selection) = hover_selection {
         selection.start.line.hash(&mut hasher);
         selection.start.column.hash(&mut hasher);
         selection.end.line.hash(&mut hasher);
@@ -2354,6 +2388,20 @@ fn token_selection_at(snapshot: &TerminalSnapshot, point: TerminalPoint) -> Term
     selection_at(snapshot, point, token_cell_class)
 }
 
+fn clickable_selection_at(
+    snapshot: &TerminalSnapshot,
+    point: TerminalPoint,
+) -> Option<TerminalSelection> {
+    let cell = snapshot.cells.iter().find(|cell| {
+        cell.line == point.line
+            && cell.column <= point.column
+            && point.column < cell.column + cell.width.max(1)
+    })?;
+
+    (clickable_cell_class(cell) == WordCellClass::Word)
+        .then(|| selection_at(snapshot, point, clickable_cell_class))
+}
+
 fn selection_at(
     snapshot: &TerminalSnapshot,
     point: TerminalPoint,
@@ -2433,12 +2481,30 @@ fn token_cell_class(cell: &TerminalCell) -> WordCellClass {
     }
 }
 
+fn clickable_cell_class(cell: &TerminalCell) -> WordCellClass {
+    if cell.text.chars().all(char::is_whitespace) {
+        WordCellClass::Whitespace
+    } else if cell.text.chars().all(is_clickable_char) {
+        WordCellClass::Word
+    } else {
+        WordCellClass::Symbol
+    }
+}
+
 fn is_plain_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_' || ch == '-'
 }
 
 fn is_terminal_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | '\\' | '@' | '~' | ':')
+}
+
+fn is_clickable_char(ch: char) -> bool {
+    ch.is_alphanumeric()
+        || matches!(
+            ch,
+            '_' | '-' | '.' | '/' | '\\' | '@' | '~' | ':' | '?' | '&' | '=' | '%' | '#' | '+'
+        )
 }
 
 fn resolve_terminal_font(family_name: &str) -> iced::Font {

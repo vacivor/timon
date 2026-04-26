@@ -277,7 +277,8 @@ pub(crate) fn update(app: &mut App, message: Message) -> Task<Message> {
             if let Some(tab) = app.terminal_tabs.iter().find(|tab| tab.id == id) {
                 let theme = app.terminal_theme(&tab.theme_id);
                 let snapshot = tab.terminal.snapshot(&theme);
-                let Some(selection) = tab.terminal.token_selection_at_point(&theme, point) else {
+                let Some(selection) = tab.terminal.clickable_selection_at_point(&theme, point)
+                else {
                     return Task::none();
                 };
                 let Some(token) = selection_contents(&snapshot, Some(&selection))

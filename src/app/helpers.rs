@@ -488,18 +488,6 @@ pub(crate) fn available_local_shells() -> Vec<String> {
     }
 }
 
-pub(crate) fn default_local_shell_path() -> String {
-    #[cfg(windows)]
-    {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "pwsh.exe".into())
-    }
-
-    #[cfg(not(windows))]
-    {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
-    }
-}
-
 pub(crate) fn local_terminal_tab_title(connection: &Connection) -> String {
     let user = current_local_username();
     let host = local_machine_name();

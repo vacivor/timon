@@ -428,12 +428,7 @@ impl App {
         let terminal_font = TerminalFont::from_settings(&settings.terminal.font);
         let glyph_atlas = Arc::new(Mutex::new(GlyphAtlas::new()));
         let settings_editor = SettingsEditor::from_settings(&settings);
-        let connections = database.list_connections().unwrap_or_default();
-        let groups = database.list_groups().unwrap_or_default();
-        let keys = database.list_keys().unwrap_or_default();
-        let identities = database.list_identities().unwrap_or_default();
-        let port_forwards = database.list_port_forwards().unwrap_or_default();
-        let known_hosts = read_known_hosts(&paths.known_hosts).unwrap_or_default();
+        let workspace = WorkspaceData::load(&paths, &database);
 
         let app = Self {
             paths,
@@ -462,13 +457,13 @@ impl App {
             active_port_forward_context: None,
             terminal_focus: None,
             terminal_composer_focus: None,
-            groups,
-            connections,
-            keys,
-            identities,
-            port_forwards,
+            groups: workspace.groups,
+            connections: workspace.connections,
+            keys: workspace.keys,
+            identities: workspace.identities,
+            port_forwards: workspace.port_forwards,
             port_forward_runtimes: std::collections::BTreeMap::new(),
-            known_hosts,
+            known_hosts: workspace.known_hosts,
             logs: vec!["Timon 已启动".into()],
             settings_editor,
         };
@@ -485,12 +480,13 @@ impl App {
     }
 
     pub(crate) fn reload_data(&mut self) {
-        self.groups = self.database.list_groups().unwrap_or_default();
-        self.connections = self.database.list_connections().unwrap_or_default();
-        self.keys = self.database.list_keys().unwrap_or_default();
-        self.identities = self.database.list_identities().unwrap_or_default();
-        self.port_forwards = self.database.list_port_forwards().unwrap_or_default();
-        self.known_hosts = read_known_hosts(&self.paths.known_hosts).unwrap_or_default();
+        let workspace = WorkspaceData::load(&self.paths, &self.database);
+        self.groups = workspace.groups;
+        self.connections = workspace.connections;
+        self.keys = workspace.keys;
+        self.identities = workspace.identities;
+        self.port_forwards = workspace.port_forwards;
+        self.known_hosts = workspace.known_hosts;
     }
 
     pub(crate) fn terminal_font(&self) -> &TerminalFont {

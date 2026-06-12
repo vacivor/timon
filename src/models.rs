@@ -199,6 +199,25 @@ impl Default for PortForward {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snippet {
+    pub id: i64,
+    pub name: String,
+    pub command: String,
+    pub description: String,
+}
+
+impl Default for Snippet {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            name: "New Snippet".into(),
+            command: String::new(),
+            description: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SftpEntry {
     pub path: String,

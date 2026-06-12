@@ -119,6 +119,14 @@ pub struct TerminalSnapshot {
     pub selection_foreground: Color,
 }
 
+#[cfg_attr(not(feature = "slint-ui"), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub struct TerminalFrame {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalSelection {
     pub start: TerminalPoint,
@@ -1573,6 +1581,247 @@ pub fn prewarm_glyph_atlas(atlas: &Arc<Mutex<GlyphAtlas>>, font: &TerminalFont, 
         let _ =
             rasterized_glyph_for_cell(atlas, font, scale_factor, &seed_cell(glyph.clone(), false));
         let _ = rasterized_glyph_for_cell(atlas, font, scale_factor, &seed_cell(glyph, true));
+    }
+}
+
+#[cfg_attr(not(feature = "slint-ui"), allow(dead_code))]
+pub fn render_terminal_frame(
+    snapshot: &TerminalSnapshot,
+    selection: Option<&TerminalSelection>,
+    hover_selection: Option<&TerminalSelection>,
+    font: &TerminalFont,
+    atlas: &Arc<Mutex<GlyphAtlas>>,
+    scale_factor: f32,
+    width: u32,
+    height: u32,
+) -> TerminalFrame {
+    let mut frame = TerminalFrame::new(width.max(1), height.max(1), snapshot.background);
+
+    if let Ok(mut atlas) = atlas.lock() {
+        for cell in &snapshot.cells {
+            let selected = selection_contains(selection, cell);
+            let cursor_on_cell = cursor_covers_cell(snapshot, cell);
+            let rect = physical_cell_rect(
+                cell.column,
+                cell.line,
+                cell.width.max(1),
+                font.metrics.cell_width,
+                font.metrics.cell_height,
+                scale_factor,
+            );
+
+            let background = if cursor_on_cell
+                && snapshot.show_cursor
+                && matches!(snapshot.cursor_shape, CursorShape::Block)
+            {
+                snapshot.cursor_color
+            } else if selected {
+                snapshot.selection_background
+            } else {
+                cell.bg
+            };
+
+            if background != snapshot.background {
+                frame.fill_rect(rect.0, rect.1, rect.2, rect.3, background);
+            }
+
+            if let Some(underline) = cell.underline {
+                frame.draw_underline(rect, underline, cell.underline_color);
+            }
+
+            if selection_contains(hover_selection, cell) {
+                frame.draw_underline(rect, UnderlineStyle::Single, cell.fg);
+            }
+
+            let Some((glyph, _, _)) =
+                rasterized_glyph_for_cell_in_atlas(&mut atlas, font, scale_factor, cell)
+            else {
+                continue;
+            };
+
+            let Some(page) = atlas.page(glyph.page_index) else {
+                continue;
+            };
+
+            let color = if cursor_on_cell
+                && snapshot.show_cursor
+                && matches!(snapshot.cursor_shape, CursorShape::Block)
+            {
+                snapshot.cursor_text
+            } else if selected {
+                snapshot.selection_foreground
+            } else {
+                cell.fg
+            };
+
+            frame.draw_glyph_mask(
+                rect.0 + glyph.offset_x,
+                rect.1 + glyph.offset_y,
+                glyph.width,
+                glyph.height,
+                &page.pixels,
+                page.width,
+                glyph.atlas_x,
+                glyph.atlas_y,
+                color,
+            );
+        }
+    }
+
+    if snapshot.show_cursor && !matches!(snapshot.cursor_shape, CursorShape::Block) {
+        let rect = cursor_visual_rect(
+            snapshot.cursor_column,
+            snapshot.cursor_line,
+            snapshot.cursor_width.max(1),
+            font.metrics.cell_width,
+            font.metrics.cell_height,
+            font.size,
+            scale_factor,
+        );
+        frame.draw_cursor(rect, snapshot.cursor_shape, snapshot.cursor_color);
+    }
+
+    frame
+}
+
+#[cfg_attr(not(feature = "slint-ui"), allow(dead_code))]
+impl TerminalFrame {
+    fn new(width: u32, height: u32, color: Color) -> Self {
+        let mut frame = Self {
+            width,
+            height,
+            pixels: vec![0; (width * height * 4) as usize],
+        };
+        frame.fill_rect(0, 0, width as i32, height as i32, color);
+        frame
+    }
+
+    fn fill_rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        let x0 = x0.clamp(0, self.width as i32);
+        let y0 = y0.clamp(0, self.height as i32);
+        let x1 = x1.clamp(0, self.width as i32);
+        let y1 = y1.clamp(0, self.height as i32);
+        let [r, g, b, a] = color.into_rgba8();
+
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.blend_pixel(x, y, r, g, b, a);
+            }
+        }
+    }
+
+    fn draw_glyph_mask(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        mask_pixels: &[u8],
+        mask_stride: u32,
+        mask_x: u32,
+        mask_y: u32,
+        color: Color,
+    ) {
+        let [r, g, b, a] = color.into_rgba8();
+        for row in 0..height {
+            for column in 0..width {
+                let mask_index = ((mask_y + row) * mask_stride + mask_x + column) as usize;
+                let Some(coverage) = mask_pixels.get(mask_index).copied() else {
+                    continue;
+                };
+                if coverage == 0 {
+                    continue;
+                }
+
+                let alpha = ((coverage as u16 * a as u16) / 255) as u8;
+                self.blend_pixel(x + column as i32, y + row as i32, r, g, b, alpha);
+            }
+        }
+    }
+
+    fn draw_underline(&mut self, rect: (i32, i32, i32, i32), style: UnderlineStyle, color: Color) {
+        let (x0, y0, x1, y1) = rect;
+        let width = (x1 - x0).max(1);
+        let baseline = y1 - 2;
+
+        match style {
+            UnderlineStyle::Single => self.fill_rect(x0, baseline, x1, baseline + 1, color),
+            UnderlineStyle::Double => {
+                self.fill_rect(x0, baseline - 2, x1, baseline - 1, color);
+                self.fill_rect(x0, baseline + 1, x1, baseline + 2, color);
+            }
+            UnderlineStyle::Curly => {
+                for offset in 0..width {
+                    let y = if (offset / 2) % 2 == 0 {
+                        baseline - 1
+                    } else {
+                        baseline
+                    };
+                    self.fill_rect(x0 + offset, y, x0 + offset + 1, y + 1, color);
+                }
+            }
+            UnderlineStyle::Dotted => {
+                let mut offset = 0;
+                while offset < width {
+                    self.fill_rect(x0 + offset, baseline, x0 + offset + 1, baseline + 1, color);
+                    offset += 3;
+                }
+            }
+            UnderlineStyle::Dashed => {
+                let mut offset = 0;
+                while offset < width {
+                    self.fill_rect(
+                        x0 + offset,
+                        baseline,
+                        (x0 + offset + 3).min(x1),
+                        baseline + 1,
+                        color,
+                    );
+                    offset += 5;
+                }
+            }
+        }
+
+        let _ = y0;
+    }
+
+    fn draw_cursor(&mut self, rect: (i32, i32, i32, i32), shape: CursorShape, color: Color) {
+        let (x0, y0, x1, y1) = rect;
+        match shape {
+            CursorShape::Block => self.fill_rect(x0, y0, x1, y1, color),
+            CursorShape::HollowBlock => {
+                self.fill_rect(x0, y0, x1, y0 + 1, color);
+                self.fill_rect(x0, y1 - 1, x1, y1, color);
+                self.fill_rect(x0, y0, x0 + 1, y1, color);
+                self.fill_rect(x1 - 1, y0, x1, y1, color);
+            }
+            CursorShape::Underline => self.fill_rect(x0, y1 - 2, x1, y1, color),
+            CursorShape::Beam => self.fill_rect(x0, y0, x0 + 2, y1, color),
+            CursorShape::Hidden => {}
+        }
+    }
+
+    fn blend_pixel(&mut self, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 || a == 0 {
+            return;
+        }
+
+        let index = ((y as u32 * self.width + x as u32) * 4) as usize;
+        if a == 255 {
+            self.pixels[index] = r;
+            self.pixels[index + 1] = g;
+            self.pixels[index + 2] = b;
+            self.pixels[index + 3] = 255;
+            return;
+        }
+
+        let inv = 255u16 - a as u16;
+        self.pixels[index] = ((r as u16 * a as u16 + self.pixels[index] as u16 * inv) / 255) as u8;
+        self.pixels[index + 1] =
+            ((g as u16 * a as u16 + self.pixels[index + 1] as u16 * inv) / 255) as u8;
+        self.pixels[index + 2] =
+            ((b as u16 * a as u16 + self.pixels[index + 2] as u16 * inv) / 255) as u8;
+        self.pixels[index + 3] = 255;
     }
 }
 

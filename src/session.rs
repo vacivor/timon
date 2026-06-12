@@ -26,7 +26,6 @@ use tokio::net::TcpListener;
 use tokio::select;
 use tokio::sync::{mpsc, watch};
 
-use crate::app::default_local_shell_path;
 use crate::models::{
     Connection, ConnectionType, Identity, Key as SshKey, PortForward, PortForwardType, SftpEntry,
 };
@@ -587,6 +586,18 @@ fn resolved_local_shell_path(connection: &Connection) -> String {
         default_local_shell_path()
     } else {
         configured.to_string()
+    }
+}
+
+fn default_local_shell_path() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "pwsh.exe".into())
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
     }
 }
 

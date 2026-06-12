@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::models::{
     Connection, ConnectionType, Group, Identity, Key as SshKey, KnownHostEntry, PortForward,
-    PortForwardType,
+    PortForwardType, Snippet,
 };
 
 #[derive(Debug, Clone)]
@@ -515,6 +515,13 @@ impl Database {
                 destination_host TEXT NOT NULL DEFAULT '',
                 destination_port INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                command TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT ''
+            );
             "#,
         )?;
         ensure_column(&connection, "connections", "key_id", "INTEGER")?;
@@ -550,6 +557,18 @@ impl Database {
             "connections",
             "baud_rate",
             "INTEGER NOT NULL DEFAULT 115200",
+        )?;
+        ensure_column(
+            &connection,
+            "snippets",
+            "command",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            &connection,
+            "snippets",
+            "description",
+            "TEXT NOT NULL DEFAULT ''",
         )?;
         Ok(())
     }
@@ -733,6 +752,24 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
+        let connection = self.open()?;
+        let mut statement = connection
+            .prepare("SELECT id, name, command, description FROM snippets ORDER BY id DESC")?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(Snippet {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                command: row.get(2)?,
+                description: row.get(3)?,
+            })
+        })?;
+
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn save_connection(&self, connection_model: &mut Connection) -> Result<()> {
         let connection = self.open()?;
 
@@ -863,6 +900,36 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    pub fn delete_key(&self, key_id: i64) -> Result<()> {
+        let connection = self.open()?;
+
+        connection.execute(
+            "UPDATE connections SET key_id = NULL WHERE key_id = ?1",
+            params![key_id],
+        )?;
+        connection.execute(
+            "UPDATE identities SET key_id = NULL WHERE key_id = ?1",
+            params![key_id],
+        )?;
+        connection.execute("DELETE FROM keys WHERE id = ?1", params![key_id])?;
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_identity(&self, identity_id: i64) -> Result<()> {
+        let connection = self.open()?;
+
+        connection.execute(
+            "UPDATE connections SET identity_id = NULL WHERE identity_id = ?1",
+            params![identity_id],
+        )?;
+        connection.execute("DELETE FROM identities WHERE id = ?1", params![identity_id])?;
+
+        Ok(())
+    }
+
     pub fn save_group(&self, group: &mut Group) -> Result<()> {
         let connection = self.open()?;
 
@@ -928,6 +995,38 @@ impl Database {
         connection.execute("DELETE FROM port_forwards WHERE id=?1", params![id])?;
         Ok(())
     }
+
+    #[allow(dead_code)]
+    pub fn save_snippet(&self, snippet: &mut Snippet) -> Result<()> {
+        let connection = self.open()?;
+
+        if snippet.id == 0 {
+            connection.execute(
+                "INSERT INTO snippets (name, command, description) VALUES (?1, ?2, ?3)",
+                params![snippet.name, snippet.command, snippet.description],
+            )?;
+            snippet.id = connection.last_insert_rowid();
+        } else {
+            connection.execute(
+                "UPDATE snippets SET name=?1, command=?2, description=?3 WHERE id=?4",
+                params![
+                    snippet.name,
+                    snippet.command,
+                    snippet.description,
+                    snippet.id,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_snippet(&self, id: i64) -> Result<()> {
+        let connection = self.open()?;
+        connection.execute("DELETE FROM snippets WHERE id=?1", params![id])?;
+        Ok(())
+    }
 }
 
 pub fn load_settings(path: &Path) -> Result<AppSettings> {
@@ -968,4 +1067,114 @@ pub fn read_known_hosts(path: &Path) -> Result<Vec<KnownHostEntry>> {
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_database_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "timon-{name}-{}-{nonce}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn snippets_round_trip_through_database() {
+        let path = temp_database_path("snippet-round-trip");
+        let database = Database::new(&path).expect("database should migrate");
+        let mut snippet = Snippet {
+            name: "Tail logs".into(),
+            command: "journalctl -fu timon".into(),
+            description: "Follow service logs".into(),
+            ..Snippet::default()
+        };
+
+        database
+            .save_snippet(&mut snippet)
+            .expect("snippet should save");
+        assert!(snippet.id > 0);
+
+        let snippets = database.list_snippets().expect("snippets should be listed");
+        assert_eq!(snippets.len(), 1);
+        assert_eq!(snippets[0].name, "Tail logs");
+        assert_eq!(snippets[0].command, "journalctl -fu timon");
+        assert_eq!(snippets[0].description, "Follow service logs");
+
+        database
+            .delete_snippet(snippet.id)
+            .expect("snippet should delete");
+        assert!(
+            database
+                .list_snippets()
+                .expect("snippets should be listed after delete")
+                .is_empty()
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn deleting_key_and_identity_clears_connection_references() {
+        let path = temp_database_path("keychain-delete-clears-references");
+        let database = Database::new(&path).expect("database should migrate");
+        let mut key = SshKey {
+            name: "deploy_key".into(),
+            ..SshKey::default()
+        };
+        database.save_key(&mut key).expect("key should save");
+        let mut identity = Identity {
+            name: "deploy".into(),
+            key_id: Some(key.id),
+            ..Identity::default()
+        };
+        database
+            .save_identity(&mut identity)
+            .expect("identity should save");
+        let mut connection = Connection {
+            name: "prod".into(),
+            key_id: Some(key.id),
+            identity_id: Some(identity.id),
+            ..Connection::default()
+        };
+        database
+            .save_connection(&mut connection)
+            .expect("connection should save");
+
+        database.delete_key(key.id).expect("key should delete");
+        let identity_after_key_delete = database
+            .list_identities()
+            .expect("identities should list")
+            .into_iter()
+            .find(|candidate| candidate.id == identity.id)
+            .expect("identity should remain");
+        let connection_after_key_delete = database
+            .list_connections()
+            .expect("connections should list")
+            .into_iter()
+            .find(|candidate| candidate.id == connection.id)
+            .expect("connection should remain");
+        assert_eq!(identity_after_key_delete.key_id, None);
+        assert_eq!(connection_after_key_delete.key_id, None);
+        assert_eq!(connection_after_key_delete.effective_key_id, None);
+
+        database
+            .delete_identity(identity.id)
+            .expect("identity should delete");
+        let connection_after_identity_delete = database
+            .list_connections()
+            .expect("connections should list")
+            .into_iter()
+            .find(|candidate| candidate.id == connection.id)
+            .expect("connection should remain");
+        assert_eq!(connection_after_identity_delete.identity_id, None);
+
+        let _ = fs::remove_file(path);
+    }
 }

@@ -24,7 +24,7 @@ use crate::models::{
 use crate::persistence::{
     AppPaths, AppSettings, Database, ShortcutSettings, TerminalAnsiGroup, TerminalColors,
     TerminalThemeEntry, builtin_terminal_theme_by_id, builtin_terminal_themes,
-    load_custom_terminal_themes, load_settings, read_known_hosts, save_settings,
+    load_custom_terminal_themes, load_settings, save_settings,
 };
 use crate::session::{
     ConnectionTarget, PortForwardHandle, SessionCommand, SessionEvent, SessionHandle, SftpHandle,
@@ -35,6 +35,7 @@ use crate::terminal::{
     TerminalSelection, TerminalSnapshot, TerminalTheme, TerminalView, available_terminal_fonts,
     canonical_terminal_font_name, prewarm_glyph_atlas,
 };
+use crate::workspace::WorkspaceData;
 
 mod constants;
 mod helpers;

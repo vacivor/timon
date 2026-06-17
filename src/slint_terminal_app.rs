@@ -12,6 +12,7 @@ use crate::persistence::{
     AppPaths, Database, TerminalColors, TerminalSettings, TerminalThemeEntry,
     builtin_terminal_theme_by_id, load_custom_terminal_themes, load_settings,
 };
+use slint::winit_030::winit;
 use crate::session::{
     ConnectionTarget, SessionCommand, SessionEvent, SessionHandle, connect_target,
 };
@@ -436,11 +437,25 @@ impl SlintCursorBlinkKey {
     }
 }
 
+fn configure_window_backend() -> anyhow::Result<()> {
+    slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attrs| {
+            attrs
+                .with_transparent(false)
+                .with_inner_size(winit::dpi::LogicalSize::new(920.0, 620.0))
+                .with_min_inner_size(winit::dpi::LogicalSize::new(400.0, 300.0))
+        })
+        .select()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub fn run() -> anyhow::Result<()> {
+    configure_window_backend()?;
     run_with_args(env::args().skip(1))
 }
 
 pub fn run_with_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
+    configure_window_backend()?;
     let paths = AppPaths::discover()?;
     let database = Database::new(&paths.database)?;
     let settings = load_settings(&paths.settings).unwrap_or_default();

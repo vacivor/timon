@@ -43,8 +43,6 @@ slint::slint! {
         callback session-event-ready();
 
         title: root.window-title;
-        width: 920px;
-        height: 620px;
         background: root.terminal-background;
 
         focus := FocusScope {

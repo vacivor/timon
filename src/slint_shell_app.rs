@@ -1,20 +1,384 @@
 #![allow(dead_code)]
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::models::{
     Connection, ConnectionType, Group, Identity, Key as SshKey, KnownHostEntry, ManageMenu,
     PortForward, Snippet,
 };
-use crate::persistence::{AppPaths, AppSettings, Database, load_settings};
+use crate::persistence::{
+    AppPaths, AppSettings, Database, TerminalColors, TerminalSettings, TerminalThemeEntry,
+    builtin_terminal_theme_by_id, load_custom_terminal_themes, load_settings,
+};
+use crate::session::{
+    ConnectionTarget, SessionCommand, SessionEvent, SessionHandle, connect_target,
+};
 use crate::slint_args::SLINT_TERMINAL_MODE_ARG;
+use crate::slint_terminal_core::{
+    TerminalCell, TerminalColor, TerminalEvent, TerminalFont, TerminalKeyModifiers, TerminalPoint,
+    TerminalSelection, TerminalSnapshot, TerminalTheme, TerminalUnderlineStyle, TerminalView,
+    normalize_selection, selection_contents,
+};
 use crate::workspace;
+use alacritty_terminal::vte::ansi::CursorShape;
+use copypasta::{ClipboardContext, ClipboardProvider};
 use slint::ComponentHandle;
+use slint::winit_030::winit;
+use slint::{Timer, TimerMode};
 
 const SHELL_LOG_LIMIT: usize = 200;
+const TERMINAL_COLS: u16 = 96;
+const TERMINAL_ROWS: u16 = 32;
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
+const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
+struct TerminalTab {
+    id: String,
+    name: String,
+    terminal: TerminalView,
+    session: SessionHandle,
+    theme: TerminalTheme,
+    font: TerminalFont,
+    line_height: f32,
+    pending_session_events: Arc<Mutex<VecDeque<SessionEvent>>>,
+    cols: usize,
+    rows: usize,
+    pixel_width: u32,
+    pixel_height: u32,
+    scale_factor: f32,
+    selection_anchor: Option<TerminalPoint>,
+    selection: Option<TerminalSelection>,
+    dragging_selection: bool,
+    terminal_mouse_button_down: bool,
+    focused: bool,
+    last_click_at: Option<Instant>,
+    last_click_point: Option<TerminalPoint>,
+    click_count: u8,
+    cursor_visible: bool,
+    cursor_blink_started_at: Instant,
+    last_cursor_blink_key: Option<CursorBlinkKey>,
+    window_title: String,
+    default_window_title: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorBlinkKey {
+    line: usize,
+    column: usize,
+    width: usize,
+    shape: CursorShape,
+    show_cursor: bool,
+    blinking: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CursorOverlay {
+    visible: bool,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: TerminalColor,
+}
+
+impl CursorBlinkKey {
+    fn from_snapshot(snapshot: &TerminalSnapshot) -> Self {
+        Self {
+            line: snapshot.cursor_line,
+            column: snapshot.cursor_column,
+            width: snapshot.cursor_width,
+            shape: snapshot.cursor_shape,
+            show_cursor: snapshot.show_cursor,
+            blinking: snapshot.cursor_blinking,
+        }
+    }
+}
+
+impl TerminalTab {
+    fn new(
+        id: String,
+        name: String,
+        terminal: TerminalView,
+        session: SessionHandle,
+        theme: TerminalTheme,
+        font: TerminalFont,
+        line_height: f32,
+        pending_session_events: Arc<Mutex<VecDeque<SessionEvent>>>,
+        default_window_title: String,
+    ) -> Self {
+        let pixel_width = (TERMINAL_COLS as f32 * font.metrics.cell_width).ceil() as u32;
+        let pixel_height = (TERMINAL_ROWS as f32 * font.metrics.cell_height).ceil() as u32;
+
+        Self {
+            id,
+            name,
+            terminal,
+            session,
+            theme,
+            font,
+            line_height,
+            pending_session_events,
+            cols: TERMINAL_COLS as usize,
+            rows: TERMINAL_ROWS as usize,
+            pixel_width,
+            pixel_height,
+            scale_factor: 1.0,
+            selection_anchor: None,
+            selection: None,
+            dragging_selection: false,
+            terminal_mouse_button_down: false,
+            focused: true,
+            last_click_at: None,
+            last_click_point: None,
+            click_count: 0,
+            cursor_visible: true,
+            cursor_blink_started_at: Instant::now(),
+            last_cursor_blink_key: None,
+            window_title: default_window_title.clone(),
+            default_window_title,
+        }
+    }
+
+    fn drain_session_events(&mut self) -> bool {
+        let mut dirty = false;
+        let mut events = Vec::new();
+        if let Ok(mut pending) = self.pending_session_events.lock() {
+            events.extend(pending.drain(..));
+        }
+        for event in events {
+            match event {
+                SessionEvent::Output(bytes) => {
+                    self.terminal.feed(&bytes);
+                    dirty = true;
+                }
+                SessionEvent::Error(message) => {
+                    self.terminal.push_local_line(&format!("Disconnected: {message}"));
+                    dirty = true;
+                }
+                SessionEvent::Disconnected(reason) => {
+                    self.terminal.push_local_line(&format!("Disconnected: {reason}"));
+                    dirty = true;
+                }
+                SessionEvent::Connected { .. } | SessionEvent::Status(_) => {}
+            }
+        }
+        dirty
+    }
+
+    fn drain_terminal_events(&mut self) -> bool {
+        let mut dirty = false;
+        while let Some(event) = self.terminal.try_recv_event() {
+            match event {
+                TerminalEvent::Title(title) => {
+                    self.window_title = if title.is_empty() {
+                        self.default_window_title.clone()
+                    } else {
+                        title
+                    };
+                    dirty = true;
+                }
+                TerminalEvent::ResetTitle => {
+                    self.window_title = self.default_window_title.clone();
+                    dirty = true;
+                }
+            }
+        }
+        dirty
+    }
+
+    fn update_cursor_blink(&mut self, now: Instant) -> bool {
+        let snapshot = self.terminal.snapshot(&self.theme);
+        let key = CursorBlinkKey::from_snapshot(&snapshot);
+        if self.last_cursor_blink_key != Some(key) {
+            self.last_cursor_blink_key = Some(key);
+            self.cursor_visible = true;
+            self.cursor_blink_started_at = now;
+            return true;
+        }
+        let next_visible = if snapshot.show_cursor && snapshot.cursor_blinking {
+            cursor_visible_for_elapsed(now.saturating_duration_since(self.cursor_blink_started_at))
+        } else {
+            true
+        };
+        if self.cursor_visible == next_visible {
+            return false;
+        }
+        self.cursor_visible = next_visible;
+        true
+    }
+
+    fn sync_font_metrics(&mut self, native_cell_width: f32, native_cell_height: f32) -> bool {
+        self.font.apply_native_metrics(native_cell_width, native_cell_height, self.line_height)
+    }
+
+    fn sync_window_size(&mut self, pixel_width: u32, pixel_height: u32, scale_factor: f32) -> bool {
+        let Some(grid) = terminal_grid_size(pixel_width, pixel_height, scale_factor, &self.font) else {
+            return false;
+        };
+        let dimensions_changed = grid.0 != self.cols || grid.1 != self.rows;
+        let pixels_changed = pixel_width != self.pixel_width
+            || pixel_height != self.pixel_height
+            || (scale_factor - self.scale_factor).abs() > f32::EPSILON;
+        if !dimensions_changed && !pixels_changed {
+            return false;
+        }
+        self.cols = grid.0;
+        self.rows = grid.1;
+        self.pixel_width = pixel_width;
+        self.pixel_height = pixel_height;
+        self.scale_factor = scale_factor.max(1.0);
+        if dimensions_changed {
+            self.terminal.resize(grid.0, grid.1);
+            let _ = self.session.command_tx.send(SessionCommand::Resize {
+                cols: grid.0.min(u16::MAX as usize) as u16,
+                rows: grid.1.min(u16::MAX as usize) as u16,
+            });
+        }
+        true
+    }
+
+    fn scroll(&mut self, delta_y: f32, x: f32, y: f32) -> bool {
+        let Some(point) = self.terminal.point_for_logical_position(
+            x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+        ) else {
+            return false;
+        };
+        let lines = delta_y / self.font.metrics.cell_height.max(1.0);
+        let lines = if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
+        if lines == 0 { return false; }
+        self.terminal.handle_scroll(lines, point);
+        true
+    }
+
+    fn pointer_down(&mut self, x: f32, y: f32) -> bool {
+        let Some(point) = self.terminal.point_for_logical_position(
+            x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+        ) else {
+            self.dragging_selection = false;
+            return false;
+        };
+        if self.terminal.handle_mouse_press(point) {
+            self.terminal_mouse_button_down = true;
+            self.dragging_selection = false;
+            self.selection_anchor = None;
+            let had_selection = self.selection.take().is_some();
+            return had_selection;
+        }
+        let now = Instant::now();
+        let is_multi_click = self.last_click_at.map_or(false, |t| {
+            now.duration_since(t) < MULTI_CLICK_INTERVAL && self.last_click_point == Some(point)
+        });
+        self.click_count = if is_multi_click { (self.click_count + 1).min(3) } else { 1 };
+        self.last_click_at = Some(now);
+        self.last_click_point = Some(point);
+        self.dragging_selection = true;
+        self.selection_anchor = Some(point);
+        self.selection = match self.click_count {
+            2 => {
+                let sel = self.terminal.word_selection_at_point(&self.theme, point);
+                Some(TerminalSelection { start: sel.start, end: sel.end })
+            }
+            3 => {
+                let sel = self.terminal.token_selection_at_point(&self.theme, point);
+                Some(TerminalSelection { start: sel.start, end: sel.end })
+            }
+            _ => Some(TerminalSelection { start: point, end: point }),
+        };
+        self.selection.is_some()
+    }
+
+    fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
+        if self.terminal_mouse_button_down {
+            let Some(point) = self.terminal.point_for_logical_position(
+                x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+            ) else { return false; };
+            return self.terminal.handle_mouse_drag(point);
+        }
+        if !self.dragging_selection { return false; }
+        let point = self.terminal.clamped_point_for_logical_position(
+            x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+        );
+        if self.click_count >= 2 {
+            let anchor = self.selection_anchor.unwrap_or(point);
+            let (new_start, new_end) = if self.click_count >= 3 {
+                let sel = self.terminal.token_selection_at_point(&self.theme, point);
+                (sel.start, sel.end)
+            } else {
+                let sel = self.terminal.word_selection_at_point(&self.theme, point);
+                (sel.start, sel.end)
+            };
+            let norm = normalize_selection(anchor, point);
+            let merged_start = if (new_start.line, new_start.column) < (norm.start.line, norm.start.column) { new_start } else { norm.start };
+            let merged_end = if (new_end.line, new_end.column) > (norm.end.line, norm.end.column) { new_end } else { norm.end };
+            self.selection = Some(TerminalSelection { start: merged_start, end: merged_end });
+        } else {
+            self.selection = Some(TerminalSelection { start: self.selection_anchor.unwrap_or(point), end: point });
+        }
+        true
+    }
+
+    fn pointer_up(&mut self, x: f32, y: f32) {
+        if self.terminal_mouse_button_down {
+            if let Some(point) = self.terminal.point_for_logical_position(
+                x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+            ) {
+                self.terminal.handle_mouse_release(point);
+            }
+            self.terminal_mouse_button_down = false;
+            return;
+        }
+        self.dragging_selection = false;
+    }
+
+    fn focus_changed(&mut self, focused: bool) -> bool {
+        if self.focused == focused { return false; }
+        self.focused = focused;
+        self.terminal.handle_focus_change(focused);
+        if focused { self.cursor_visible = true; self.cursor_blink_started_at = Instant::now(); }
+        !focused && self.selection.is_some()
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let snapshot = self.terminal.snapshot(&self.theme);
+        selection_contents(&snapshot, Some(sel))
+    }
+
+    fn paste_text(&mut self, text: &str) -> bool {
+        let encoded = self.terminal.encode_text_input(text);
+        self.send_terminal_input(encoded)
+    }
+
+    fn send_terminal_input(&mut self, bytes: Vec<u8>) -> bool {
+        self.session.command_tx.send(SessionCommand::Input(bytes)).is_ok()
+    }
+
+    fn disconnect(&self, reason: &str) {
+        let _ = self.session.command_tx.send(SessionCommand::Disconnect(reason.to_string()));
+    }
+}
+
+fn cursor_visible_for_elapsed(elapsed: Duration) -> bool {
+    (elapsed.as_millis() / CURSOR_BLINK_INTERVAL.as_millis()) % 2 == 0
+}
+
+fn terminal_grid_size(
+    pixel_width: u32, pixel_height: u32, scale_factor: f32, font: &TerminalFont,
+) -> Option<(usize, usize)> {
+    let cell_width = font.metrics.cell_width;
+    let cell_height = font.metrics.cell_height;
+    if cell_width <= 0.0 || cell_height <= 0.0 { return None; }
+    let logical_width = pixel_width as f32 / scale_factor.max(1.0);
+    let logical_height = pixel_height as f32 / scale_factor.max(1.0);
+    let cols = (logical_width / cell_width).floor().max(1.0) as usize;
+    let rows = (logical_height / cell_height).floor().max(1.0) as usize;
+    Some((cols, rows))
+}
 
 slint::slint! {
     import { LineEdit } from "std-widgets.slint";
@@ -47,6 +411,33 @@ slint::slint! {
         badge: string,
         initial: string,
         accent: color,
+    }
+
+    export struct TerminalCellItem {
+        text: string,
+        x: length,
+        y: length,
+        width: length,
+        height: length,
+        foreground: color,
+        background: color,
+        bold: bool,
+        italic: bool,
+    }
+
+    export struct TerminalDecorationItem {
+        x: length,
+        y: length,
+        width: length,
+        height: length,
+        color: color,
+    }
+
+    export struct TabItem {
+        id: string,
+        title: string,
+        active: bool,
+        is-terminal: bool,
     }
 
     component NavRow inherits Rectangle {
@@ -305,16 +696,52 @@ slint::slint! {
         in property <string> selected-connection-type;
         in property <string> connect-status;
         in property <string> search-query;
+
+        // Tab system
+        in property <[TabItem]> tabs;
+        in property <int> active-tab-index: -1;
+
+        // Terminal rendering
+        in property <[TerminalCellItem]> terminal-cells;
+        in property <[TerminalDecorationItem]> terminal-decorations;
+        in property <color> terminal-background: #0f1419;
+        in property <string> terminal-font-family: "monospace";
+        in property <length> terminal-font-size: 13px;
+        out property <length> terminal-native-cell-width: terminal-font-measure.preferred-width / 10;
+        out property <length> terminal-native-cell-height: terminal-font-measure.font-metrics.ascent - terminal-font-measure.font-metrics.descent;
+        in property <bool> cursor-overlay-visible: false;
+        in property <length> cursor-overlay-x: 0px;
+        in property <length> cursor-overlay-y: 0px;
+        in property <length> cursor-overlay-width: 0px;
+        in property <length> cursor-overlay-height: 0px;
+        in property <color> cursor-overlay-color: #ffffff;
+
         callback select-menu(int);
         callback select-connection(string);
         callback connect-selected-connection();
         callback open-connection(string);
         callback search-changed(string);
+        callback select-tab(int);
+        callback close-tab(int);
+        callback terminal-input(string, bool, bool, bool, bool);
+        callback terminal-pointer-down(float, float);
+        callback terminal-pointer-moved(float, float);
+        callback terminal-pointer-up(float, float);
+        callback terminal-scroll(float, float, float);
+        callback terminal-focus-changed(bool);
+        callback session-event-ready();
 
-        title: "Timon";
-        width: 920px;
-        height: 620px;
+        title: active-tab-index >= 0 && active-tab-index < tabs.length ? tabs[active-tab-index].title : "Timon";
         background: #edf1f2;
+
+        // Font measurement (always present, invisible)
+        terminal-font-measure := Text {
+            visible: false;
+            text: "MMMMMMMMMM";
+            font-family: root.terminal-font-family;
+            font-size: root.terminal-font-size;
+            font-weight: 400;
+        }
 
         Rectangle {
             width: 100%;
@@ -405,48 +832,48 @@ slint::slint! {
             }
         }
 
+        // Tab bar
         Rectangle {
             x: 184px;
             y: 52px;
             width: parent.width - 184px;
-            height: parent.height - 52px;
-            background: #edf1f2;
+            height: root.tabs.length > 0 ? 36px : 0px;
+            background: #3f465c;
 
-            Rectangle {
-                x: 0px;
-                y: 0px;
-                width: parent.width;
-                height: 56px;
-                background: #e4eaec;
+            for tab[index] in root.tabs: Rectangle {
+                x: 8px + index * 140px;
+                y: 4px;
+                width: 130px;
+                height: 28px;
+                border-radius: 6px;
+                background: tab.active ? #535a70 : transparent;
 
-                LineEdit {
-                    x: 18px;
-                    y: 10px;
-                    width: root.active-menu-index == 0 ? parent.width - 150px : parent.width - 36px;
-                    height: 36px;
-                    text: root.search-query;
-                    placeholder-text: "Find a host or ssh user@hostname...";
-                    edited(value) => {
-                        root.search-changed(value);
-                    }
+                Text {
+                    x: 8px;
+                    width: parent.width - 28px;
+                    height: 100%;
+                    text: tab.title;
+                    color: #ffffff;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
 
+                // Close button
                 Rectangle {
-                    x: parent.width - 118px;
-                    y: 12px;
-                    width: 98px;
-                    height: 32px;
-                    border-radius: 10px;
-                    background: #3f465c;
-                    visible: root.active-menu-index == 0;
+                    x: parent.width - 22px;
+                    y: 6px;
+                    width: 16px;
+                    height: 16px;
+                    border-radius: 8px;
+                    background: #8a91a5;
 
                     Text {
                         width: 100%;
                         height: 100%;
-                        text: "CONNECT";
+                        text: "×";
                         color: #ffffff;
-                        font-size: 11px;
-                        font-weight: 700;
+                        font-size: 12px;
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
@@ -455,183 +882,556 @@ slint::slint! {
                         width: 100%;
                         height: 100%;
                         clicked => {
-                            root.connect-selected-connection();
+                            root.close-tab(index);
                         }
                     }
                 }
-            }
 
-            Text {
-                x: 30px;
-                y: 82px;
-                width: parent.width - 60px;
-                height: 24px;
-                text: root.page-title;
-                color: #111827;
-                font-size: 18px;
-                font-weight: 800;
-            }
-
-            Text {
-                x: 30px;
-                y: 106px;
-                width: parent.width - 320px;
-                height: 18px;
-                text: root.page-subtitle;
-                color: #657386;
-                font-size: 12px;
-            }
-
-            Text {
-                x: parent.width - 300px;
-                y: 106px;
-                width: 270px;
-                height: 18px;
-                text: root.connect-status;
-                color: #657386;
-                font-size: 12px;
-                horizontal-alignment: right;
-                overflow: elide;
-            }
-
-            for stat[index] in root.stats: StatCard {
-                x: 30px + index * 172px;
-                y: 136px;
-                stat: stat;
-            }
-
-            Rectangle {
-                x: parent.width - 236px;
-                y: 100px;
-                width: 206px;
-                height: 128px;
-                border-radius: 16px;
-                background: #ffffff;
-                border-width: 1px;
-                border-color: #dce5e8;
-                visible: root.active-menu-index == 0;
-
-                Text {
-                    x: 18px;
-                    y: 16px;
-                    width: parent.width - 36px;
-                    height: 18px;
-                    text: "Selected";
-                    color: #657386;
-                    font-size: 12px;
-                    font-weight: 700;
-                }
-
-                Text {
-                    x: 18px;
-                    y: 40px;
-                    width: parent.width - 36px;
-                    height: 22px;
-                    text: root.selected-connection-name;
-                    color: #111827;
-                    font-size: 15px;
-                    font-weight: 800;
-                    overflow: elide;
-                }
-
-                Text {
-                    x: 18px;
-                    y: 66px;
-                    width: parent.width - 36px;
-                    height: 18px;
-                    text: root.selected-connection-endpoint;
-                    color: #657386;
-                    font-size: 12px;
-                    overflow: elide;
-                }
-
-                Rectangle {
-                    x: 18px;
-                    y: 94px;
-                    width: 70px;
-                    height: 20px;
-                    border-radius: 10px;
-                    background: #eef4f6;
-
-                    Text {
-                        width: 100%;
-                        height: 100%;
-                        text: root.selected-connection-type;
-                        color: #526174;
-                        font-size: 10px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                TouchArea {
+                    width: parent.width;
+                    height: parent.height;
+                    clicked => {
+                        root.select-tab(index);
                     }
                 }
             }
+        }
 
-            Text {
-                x: 30px;
-                y: 256px;
-                width: parent.width - 60px;
-                height: 22px;
-                text: "Groups";
-                color: #111827;
-                font-size: 15px;
-                font-weight: 800;
-                visible: root.active-menu-index == 0;
-            }
+        // Content area
+        Rectangle {
+            x: 184px;
+            y: 52px + (root.tabs.length > 0 ? 36px : 0px);
+            width: parent.width - 184px;
+            height: parent.height - 52px - (root.tabs.length > 0 ? 36px : 0px);
+            background: root.active-tab-index >= 0 ? root.terminal-background : #edf1f2;
 
-            for item[index] in root.group-items: ListRow {
-                x: 30px + Math.mod(index, 2) * 378px;
-                y: 292px + Math.floor(index / 2) * 74px;
-                item: item;
-                visible: root.active-menu-index == 0;
-            }
+            // Management content (visible when no terminal tab is active)
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                visible: root.active-tab-index < 0;
 
-            Text {
-                x: 30px;
-                y: root.active-menu-index == 0 ? 292px + root.connection-group-rows * 74px + 24px : 256px;
-                width: parent.width - 60px;
-                height: 22px;
-                text: root.page-title;
-                color: #111827;
-                font-size: 15px;
-                font-weight: 800;
-                visible: root.active-menu-index != 0;
-            }
+                Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: 56px;
+                    background: #e4eaec;
 
-            Text {
-                x: 30px;
-                y: 292px + root.connection-group-rows * 74px + 24px;
-                width: parent.width - 60px;
-                height: 22px;
-                text: "Connections";
-                color: #111827;
-                font-size: 15px;
-                font-weight: 800;
-                visible: root.active-menu-index == 0;
-            }
+                    LineEdit {
+                        x: 18px;
+                        y: 10px;
+                        width: root.active-menu-index == 0 ? parent.width - 150px : parent.width - 36px;
+                        height: 36px;
+                        text: root.search-query;
+                        placeholder-text: "Find a host or ssh user@hostname...";
+                        edited(value) => {
+                            root.search-changed(value);
+                        }
+                    }
 
-            for connection[index] in root.connections: ConnectionRow {
-                x: 30px + Math.mod(index, 2) * 378px;
-                y: 292px + root.connection-group-rows * 74px + 60px + Math.floor(index / 2) * 74px;
-                connection: connection;
-                selected: connection.id == root.selected-connection-id;
-                visible: root.active-menu-index == 0;
-                clicked => {
-                    root.select-connection(connection.id);
-                    root.open-connection(connection.id);
+                    Rectangle {
+                        x: parent.width - 118px;
+                        y: 12px;
+                        width: 98px;
+                        height: 32px;
+                        border-radius: 10px;
+                        background: #3f465c;
+                        visible: root.active-menu-index == 0;
+
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: "CONNECT";
+                            color: #ffffff;
+                            font-size: 11px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            clicked => {
+                                root.connect-selected-connection();
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    x: 30px;
+                    y: 82px;
+                    width: parent.width - 60px;
+                    height: 24px;
+                    text: root.page-title;
+                    color: #111827;
+                    font-size: 18px;
+                    font-weight: 800;
+                }
+
+                Text {
+                    x: 30px;
+                    y: 106px;
+                    width: parent.width - 320px;
+                    height: 18px;
+                    text: root.page-subtitle;
+                    color: #657386;
+                    font-size: 12px;
+                }
+
+                Text {
+                    x: parent.width - 300px;
+                    y: 106px;
+                    width: 270px;
+                    height: 18px;
+                    text: root.connect-status;
+                    color: #657386;
+                    font-size: 12px;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                }
+
+                for stat[index] in root.stats: StatCard {
+                    x: 30px + index * 172px;
+                    y: 136px;
+                    stat: stat;
+                }
+
+                Rectangle {
+                    x: parent.width - 236px;
+                    y: 100px;
+                    width: 206px;
+                    height: 128px;
+                    border-radius: 16px;
+                    background: #ffffff;
+                    border-width: 1px;
+                    border-color: #dce5e8;
+                    visible: root.active-menu-index == 0;
+
+                    Text {
+                        x: 18px;
+                        y: 16px;
+                        width: parent.width - 36px;
+                        height: 18px;
+                        text: "Selected";
+                        color: #657386;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        x: 18px;
+                        y: 40px;
+                        width: parent.width - 36px;
+                        height: 22px;
+                        text: root.selected-connection-name;
+                        color: #111827;
+                        font-size: 15px;
+                        font-weight: 800;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        x: 18px;
+                        y: 66px;
+                        width: parent.width - 36px;
+                        height: 18px;
+                        text: root.selected-connection-endpoint;
+                        color: #657386;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+
+                    Rectangle {
+                        x: 18px;
+                        y: 94px;
+                        width: 70px;
+                        height: 20px;
+                        border-radius: 10px;
+                        background: #eef4f6;
+
+                        Text {
+                            width: 100%;
+                            height: 100%;
+                            text: root.selected-connection-type;
+                            color: #526174;
+                            font-size: 10px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Text {
+                    x: 30px;
+                    y: 256px;
+                    width: parent.width - 60px;
+                    height: 22px;
+                    text: "Groups";
+                    color: #111827;
+                    font-size: 15px;
+                    font-weight: 800;
+                    visible: root.active-menu-index == 0;
+                }
+
+                for item[index] in root.group-items: ListRow {
+                    x: 30px + Math.mod(index, 2) * 378px;
+                    y: 292px + Math.floor(index / 2) * 74px;
+                    item: item;
+                    visible: root.active-menu-index == 0;
+                }
+
+                Text {
+                    x: 30px;
+                    y: root.active-menu-index == 0 ? 292px + root.connection-group-rows * 74px + 24px : 256px;
+                    width: parent.width - 60px;
+                    height: 22px;
+                    text: root.page-title;
+                    color: #111827;
+                    font-size: 15px;
+                    font-weight: 800;
+                    visible: root.active-menu-index != 0;
+                }
+
+                Text {
+                    x: 30px;
+                    y: 292px + root.connection-group-rows * 74px + 24px;
+                    width: parent.width - 60px;
+                    height: 22px;
+                    text: "Connections";
+                    color: #111827;
+                    font-size: 15px;
+                    font-weight: 800;
+                    visible: root.active-menu-index == 0;
+                }
+
+                for connection[index] in root.connections: ConnectionRow {
+                    x: 30px + Math.mod(index, 2) * 378px;
+                    y: 292px + root.connection-group-rows * 74px + 60px + Math.floor(index / 2) * 74px;
+                    connection: connection;
+                    selected: connection.id == root.selected-connection-id;
+                    visible: root.active-menu-index == 0;
+                    clicked => {
+                        root.select-connection(connection.id);
+                        root.open-connection(connection.id);
+                    }
+                }
+
+                for item[index] in root.list-items: ListRow {
+                    x: 30px + Math.mod(index, 2) * 378px;
+                    y: 292px + Math.floor(index / 2) * 74px;
+                    item: item;
+                    visible: root.active-menu-index != 0;
                 }
             }
 
-            for item[index] in root.list-items: ListRow {
-                x: 30px + Math.mod(index, 2) * 378px;
-                y: 292px + Math.floor(index / 2) * 74px;
-                item: item;
-                visible: root.active-menu-index != 0;
+            // Terminal rendering (visible when a terminal tab is active)
+            if root.active-tab-index >= 0: FocusScope {
+                width: 100%;
+                height: 100%;
+                focus-on-click: true;
+
+                capture-key-pressed(event) => {
+                    if (event.text != "") {
+                        root.terminal-input(
+                            event.text,
+                            event.modifiers.alt,
+                            event.modifiers.control,
+                            event.modifiers.shift,
+                            event.modifiers.meta,
+                        );
+                        return accept;
+                    }
+                    return reject;
+                }
+
+                focus-gained(_) => {
+                    root.terminal-focus-changed(true);
+                }
+
+                focus-lost(_) => {
+                    root.terminal-focus-changed(false);
+                }
+
+                Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: root.terminal-background;
+
+                    for cell in root.terminal-cells: Rectangle {
+                        x: cell.x;
+                        y: cell.y;
+                        width: cell.width;
+                        height: cell.height;
+                        background: cell.background;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: cell.text;
+                            color: cell.foreground;
+                            font-family: root.terminal-font-family;
+                            font-size: root.terminal-font-size;
+                            font-weight: cell.bold ? 700 : 400;
+                            font-italic: cell.italic;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    for decoration in root.terminal-decorations: Rectangle {
+                        x: decoration.x;
+                        y: decoration.y;
+                        width: decoration.width;
+                        height: decoration.height;
+                        background: decoration.color;
+                    }
+
+                    Rectangle {
+                        visible: root.cursor-overlay-visible;
+                        x: root.cursor-overlay-x;
+                        y: root.cursor-overlay-y;
+                        width: root.cursor-overlay-width;
+                        height: root.cursor-overlay-height;
+                        background: root.cursor-overlay-color;
+                    }
+                }
+
+                TouchArea {
+                    width: 100%;
+                    height: 100%;
+
+                    pointer-event(event) => {
+                        if (event.button != PointerEventButton.left) {
+                            return;
+                        }
+                        if (event.kind == PointerEventKind.down) {
+                            root.terminal-pointer-down(self.mouse-x / 1px, self.mouse-y / 1px);
+                        } else if (event.kind == PointerEventKind.move) {
+                            root.terminal-pointer-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                        } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                            root.terminal-pointer-up(self.mouse-x / 1px, self.mouse-y / 1px);
+                        }
+                    }
+
+                    scroll-event(event) => {
+                        root.terminal-scroll(event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px);
+                        return accept;
+                    }
+                }
             }
         }
     }
 }
 
+// --- Terminal rendering helpers ---
+
+fn slint_color([r, g, b, a]: [u8; 4]) -> slint::Color {
+    slint::Color::from_argb_u8(a, r, g, b)
+}
+
+fn slint_selection_contains(selection: Option<&TerminalSelection>, cell: &TerminalCell) -> bool {
+    let Some(sel) = selection else { return false; };
+    let norm = normalize_selection(sel.start, sel.end);
+    let p = (cell.line, cell.column);
+    p >= (norm.start.line, norm.start.column) && p <= (norm.end.line, norm.end.column)
+}
+
+fn slint_cursor_covers_cell(snapshot: &TerminalSnapshot, cell: &TerminalCell) -> bool {
+    if !snapshot.show_cursor { return false; }
+    let cursor_col = snapshot.cursor_column;
+    let cursor_line = snapshot.cursor_line;
+    if cell.line != cursor_line { return false; }
+    cell.column >= cursor_col && cell.column < cursor_col + snapshot.cursor_width
+}
+
+fn cursor_overlay_from_snapshot(
+    snapshot: &TerminalSnapshot, font: &TerminalFont, cursor_visible: bool,
+) -> CursorOverlay {
+    if !cursor_visible || !snapshot.show_cursor {
+        return CursorOverlay { visible: false, x: 0.0, y: 0.0, width: 0.0, height: 0.0, color: snapshot.cursor_color };
+    }
+    match snapshot.cursor_shape {
+        CursorShape::Block | CursorShape::Hidden => {
+            CursorOverlay { visible: false, x: 0.0, y: 0.0, width: 0.0, height: 0.0, color: snapshot.cursor_color }
+        }
+        CursorShape::Beam => {
+            let beam_width = font.metrics.cell_width.max(2.0);
+            CursorOverlay {
+                visible: true,
+                x: snapshot.cursor_column as f32 * font.metrics.cell_width,
+                y: snapshot.cursor_line as f32 * font.metrics.cell_height,
+                width: beam_width,
+                height: font.metrics.cell_height,
+                color: snapshot.cursor_color,
+            }
+        }
+        CursorShape::Underline | CursorShape::HollowBlock => {
+            let stroke = (font.metrics.cell_height * 0.08).ceil().max(1.0);
+            CursorOverlay {
+                visible: true,
+                x: snapshot.cursor_column as f32 * font.metrics.cell_width,
+                y: (snapshot.cursor_line + 1) as f32 * font.metrics.cell_height - stroke,
+                width: snapshot.cursor_width as f32 * font.metrics.cell_width,
+                height: stroke,
+                color: snapshot.cursor_color,
+            }
+        }
+    }
+}
+
+fn snapshot_to_shell_cells(
+    snapshot: &TerminalSnapshot, selection: Option<&TerminalSelection>, font: &TerminalFont,
+    cursor_visible: bool,
+) -> slint::ModelRc<TerminalCellItem> {
+    let cells = snapshot.cells.iter().map(|cell| {
+        let selected = slint_selection_contains(selection, cell);
+        let cursor_on_cell = slint_cursor_covers_cell(snapshot, cell);
+        let foreground = if cursor_on_cell && cursor_visible && snapshot.show_cursor
+            && matches!(snapshot.cursor_shape, CursorShape::Block)
+        {
+            snapshot.cursor_text
+        } else if selected { snapshot.selection_foreground } else { cell.fg };
+        let background = if cursor_on_cell && cursor_visible && snapshot.show_cursor
+            && matches!(snapshot.cursor_shape, CursorShape::Block)
+        {
+            snapshot.cursor_color
+        } else if selected { snapshot.selection_background } else { cell.bg };
+
+        TerminalCellItem {
+            text: if cell.hidden { "".into() } else { cell.text.clone().into() },
+            x: cell.column as f32 * font.metrics.cell_width,
+            y: cell.line as f32 * font.metrics.cell_height,
+            width: cell.width.max(1) as f32 * font.metrics.cell_width,
+            height: font.metrics.cell_height,
+            foreground: slint_color(foreground.rgba8()),
+            background: slint_color(background.rgba8()),
+            bold: cell.bold,
+            italic: cell.italic,
+        }
+    }).collect::<Vec<_>>();
+    slint::ModelRc::new(slint::VecModel::from(cells))
+}
+
+fn decoration_stroke_width(font: &TerminalFont) -> f32 {
+    (font.metrics.cell_height * 0.06).ceil().max(1.0)
+}
+
+fn snapshot_to_shell_decorations(
+    snapshot: &TerminalSnapshot, font: &TerminalFont,
+) -> slint::ModelRc<TerminalDecorationItem> {
+    let mut decorations = Vec::new();
+    for cell in &snapshot.cells {
+        if cell.hidden { continue; }
+        let x = cell.column as f32 * font.metrics.cell_width;
+        let y = cell.line as f32 * font.metrics.cell_height;
+        let width = cell.width.max(1) as f32 * font.metrics.cell_width;
+        let height = font.metrics.cell_height;
+        if let Some(style) = cell.underline {
+            push_underline(&mut decorations, x, y, width, height, style, cell.underline_color, font);
+        }
+        if cell.strikeout {
+            push_decoration_rect(&mut decorations, x, y + height * 0.56, width, decoration_stroke_width(font), cell.fg);
+        }
+    }
+    slint::ModelRc::new(slint::VecModel::from(decorations))
+}
+
+fn push_underline(
+    decorations: &mut Vec<TerminalDecorationItem>, x: f32, y: f32, width: f32, height: f32,
+    style: TerminalUnderlineStyle, color: TerminalColor, font: &TerminalFont,
+) {
+    let stroke = decoration_stroke_width(font);
+    let baseline_y = y + height - stroke;
+    match style {
+        TerminalUnderlineStyle::Single => {
+            push_decoration_rect(decorations, x, baseline_y, width, stroke, color);
+        }
+        TerminalUnderlineStyle::Double => {
+            push_decoration_rect(decorations, x, baseline_y, width, stroke, color);
+            push_decoration_rect(decorations, x, baseline_y - stroke * 2.0, width, stroke, color);
+        }
+        TerminalUnderlineStyle::Dotted => {
+            let gap = (stroke * 2.0).max(2.0);
+            let mut cx = x;
+            while cx < x + width {
+                let seg = gap.min(x + width - cx);
+                push_decoration_rect(decorations, cx, baseline_y, seg, stroke, color);
+                cx += gap * 2.0;
+            }
+        }
+        TerminalUnderlineStyle::Dashed => {
+            let seg = (width * 0.12).max(4.0);
+            let gap = (seg * 0.75).max(2.0);
+            let mut cx = x;
+            while cx < x + width {
+                let s = seg.min(x + width - cx);
+                push_decoration_rect(decorations, cx, baseline_y, s, stroke, color);
+                cx += seg + gap;
+            }
+        }
+        TerminalUnderlineStyle::Curly => {
+            let amplitude = (height * 0.12).max(2.0);
+            let half_period = (font.metrics.cell_width * 0.5).max(3.0);
+            let mut cx = x;
+            let mut high = true;
+            while cx < x + width {
+                let seg = half_period.min(x + width - cx);
+                let cy = if high { baseline_y - amplitude } else { baseline_y };
+                push_decoration_rect(decorations, cx, cy, seg, stroke, color);
+                cx += seg;
+                high = !high;
+            }
+        }
+    }
+}
+
+fn push_decoration_rect(
+    decorations: &mut Vec<TerminalDecorationItem>, x: f32, y: f32, width: f32, height: f32, color: TerminalColor,
+) {
+    decorations.push(TerminalDecorationItem {
+        x, y, width, height,
+        color: slint_color(color.rgba8()),
+    });
+}
+
+fn is_copy_shortcut(text: &str, modifiers: TerminalKeyModifiers) -> bool {
+    (modifiers.control || modifiers.meta) && (text == "c" || text == "C") && !modifiers.alt && !modifiers.shift
+}
+
+fn is_paste_shortcut(text: &str, modifiers: TerminalKeyModifiers) -> bool {
+    (modifiers.control || modifiers.meta) && (text == "v" || text == "V") && !modifiers.alt && !modifiers.shift
+}
+
+fn write_clipboard(text: String) {
+    if let Ok(mut ctx) = ClipboardContext::new() {
+        let _ = ctx.set_contents(text);
+    }
+}
+
+fn read_clipboard() -> String {
+    ClipboardContext::new()
+        .ok()
+        .and_then(|mut ctx| ctx.get_contents().ok())
+        .unwrap_or_default()
+}
+
+fn configure_window_backend() -> anyhow::Result<()> {
+    slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(|attrs| {
+            attrs
+                .with_transparent(false)
+                .with_inner_size(winit::dpi::LogicalSize::new(920.0, 620.0))
+                .with_min_inner_size(winit::dpi::LogicalSize::new(400.0, 300.0))
+        })
+        .select()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 pub fn run() -> anyhow::Result<()> {
+    configure_window_backend()?;
     let paths = Rc::new(AppPaths::discover()?);
     let database = Rc::new(Database::new(&paths.database)?);
     let settings = Rc::new(load_settings(&paths.settings).unwrap_or_default());
@@ -643,6 +1443,10 @@ pub fn run() -> anyhow::Result<()> {
         &workspace.borrow(),
         settings.as_ref(),
     )));
+
+    let runtime = Rc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build()?);
+    let terminal_tabs: Rc<RefCell<Vec<TerminalTab>>> = Rc::new(RefCell::new(Vec::new()));
+    let active_tab_index: Rc<RefCell<i32>> = Rc::new(RefCell::new(-1));
 
     let ui = TimonSlintShellWindow::new()?;
     apply_workspace(
@@ -662,12 +1466,20 @@ pub fn run() -> anyhow::Result<()> {
         );
     }
 
+    // select-menu
     let ui_weak = ui.as_weak();
     let menu_workspace = Rc::clone(&workspace);
     let menu_settings = Rc::clone(&settings);
     let menu_logs = Rc::clone(&shell_logs);
+    let menu_tabs = Rc::clone(&terminal_tabs);
+    let menu_active = Rc::clone(&active_tab_index);
     ui.on_select_menu(move |menu_index| {
         if let Some(ui) = ui_weak.upgrade() {
+            // Switch away from terminal tab to management
+            *menu_active.borrow_mut() = -1;
+            ui.set_active_tab_index(-1);
+            apply_tabs_to_ui(&ui, &menu_tabs.borrow(), -1);
+
             let active_menu = manage_menu_from_index(menu_index);
             let query = ui.get_search_query().to_string();
             record_shell_log(&menu_logs, format!("Opened {}", active_menu.title()));
@@ -693,6 +1505,7 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
+    // select-connection
     let ui_weak = ui.as_weak();
     let selection_workspace = Rc::clone(&workspace);
     ui.on_select_connection(move |selected_id| {
@@ -702,32 +1515,101 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
+    // connect-selected-connection (opens terminal tab)
     let ui_weak = ui.as_weak();
+    let connect_tabs = Rc::clone(&terminal_tabs);
+    let connect_active = Rc::clone(&active_tab_index);
+    let connect_workspace = Rc::clone(&workspace);
+    let connect_settings = Rc::clone(&settings);
+    let connect_paths = Rc::clone(&paths);
+    let connect_runtime = Rc::clone(&runtime);
     let connect_logs = Rc::clone(&shell_logs);
     ui.on_connect_selected_connection(move || {
         if let Some(ui) = ui_weak.upgrade() {
-            let status = launch_status_for_active_menu(
-                manage_menu_from_index(ui.get_active_menu_index()),
-                ui.get_selected_connection_id().as_str(),
-            );
+            let selected_id = ui.get_selected_connection_id().to_string();
+            let status = match open_terminal_tab(
+                &ui, &connect_tabs, &connect_active, &connect_workspace,
+                &connect_settings, &connect_paths, &connect_runtime, &selected_id,
+            ) {
+                Ok(tab_name) => format!("Opened terminal: {tab_name}"),
+                Err(e) => e,
+            };
             record_shell_log(&connect_logs, status.clone());
             ui.set_connect_status(status.into());
         }
     });
 
+    // open-connection (opens terminal tab)
     let ui_weak = ui.as_weak();
+    let open_tabs = Rc::clone(&terminal_tabs);
+    let open_active = Rc::clone(&active_tab_index);
+    let open_workspace = Rc::clone(&workspace);
+    let open_settings = Rc::clone(&settings);
+    let open_paths = Rc::clone(&paths);
+    let open_runtime = Rc::clone(&runtime);
     let open_logs = Rc::clone(&shell_logs);
     ui.on_open_connection(move |connection_id| {
         if let Some(ui) = ui_weak.upgrade() {
-            let status = launch_status_for_active_menu(
-                manage_menu_from_index(ui.get_active_menu_index()),
-                connection_id.as_str(),
-            );
+            let status = match open_terminal_tab(
+                &ui, &open_tabs, &open_active, &open_workspace,
+                &open_settings, &open_paths, &open_runtime, connection_id.as_str(),
+            ) {
+                Ok(tab_name) => format!("Opened terminal: {tab_name}"),
+                Err(e) => e,
+            };
             record_shell_log(&open_logs, status.clone());
             ui.set_connect_status(status.into());
         }
     });
 
+    // select-tab
+    let ui_weak = ui.as_weak();
+    let select_tabs = Rc::clone(&terminal_tabs);
+    let select_active = Rc::clone(&active_tab_index);
+    ui.on_select_tab(move |tab_index| {
+        if let Some(ui) = ui_weak.upgrade() {
+            let tabs = select_tabs.borrow();
+            if tab_index >= 0 && (tab_index as usize) < tabs.len() {
+                *select_active.borrow_mut() = tab_index;
+                ui.set_active_tab_index(tab_index);
+                apply_tabs_to_ui(&ui, &tabs, tab_index);
+                sync_active_terminal_to_ui(&ui, &tabs[tab_index as usize]);
+            }
+        }
+    });
+
+    // close-tab
+    let ui_weak = ui.as_weak();
+    let close_tabs = Rc::clone(&terminal_tabs);
+    let close_active = Rc::clone(&active_tab_index);
+    let close_workspace = Rc::clone(&workspace);
+    let close_settings = Rc::clone(&settings);
+    let close_logs = Rc::clone(&shell_logs);
+    ui.on_close_tab(move |tab_index| {
+        if let Some(ui) = ui_weak.upgrade() {
+            let mut tabs = close_tabs.borrow_mut();
+            if tab_index >= 0 && (tab_index as usize) < tabs.len() {
+                let tab = tabs.remove(tab_index as usize);
+                tab.disconnect("tab closed");
+                let mut active = close_active.borrow_mut();
+                if tabs.is_empty() {
+                    *active = -1;
+                    ui.set_active_tab_index(-1);
+                    apply_tabs_to_ui(&ui, &tabs, -1);
+                    // Show management view
+                    let workspace = close_workspace.borrow();
+                    apply_workspace(&ui, &workspace, close_settings.as_ref(), close_logs.borrow().as_slice(), ManageMenu::Connections, "");
+                } else {
+                    *active = (*active).min(tabs.len() as i32 - 1);
+                    ui.set_active_tab_index(*active);
+                    apply_tabs_to_ui(&ui, &tabs, *active);
+                    sync_active_terminal_to_ui(&ui, &tabs[*active as usize]);
+                }
+            }
+        }
+    });
+
+    // search-changed
     let ui_weak = ui.as_weak();
     let search_workspace = Rc::clone(&workspace);
     let search_settings = Rc::clone(&settings);
@@ -757,9 +1639,291 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
-    ui.run()?;
+    // terminal-input
+    let input_tabs = Rc::clone(&terminal_tabs);
+    let input_active = Rc::clone(&active_tab_index);
+    ui.on_terminal_input(move |text, alt, control, shift, meta| {
+        let active = *input_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = input_tabs.borrow_mut();
+        let Some(tab) = tabs.get_mut(active as usize) else { return; };
+        let modifiers = TerminalKeyModifiers { alt, control, shift, meta };
+        if is_copy_shortcut(&text, modifiers) {
+            if let Some(contents) = tab.selected_text() { write_clipboard(contents); }
+            return;
+        }
+        if is_paste_shortcut(&text, modifiers) {
+            let contents = read_clipboard();
+            if !contents.is_empty() {
+                tab.paste_text(&contents);
+            }
+            return;
+        }
+        let Some(payload) = tab.terminal.encode_key_text(&text, modifiers) else { return; };
+        tab.send_terminal_input(payload);
+    });
 
-    Ok(())
+    // terminal-pointer-down
+    let pd_tabs = Rc::clone(&terminal_tabs);
+    let pd_active = Rc::clone(&active_tab_index);
+    ui.on_terminal_pointer_down(move |x, y| {
+        let active = *pd_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = pd_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) { tab.pointer_down(x, y); }
+    });
+
+    // terminal-pointer-moved
+    let pm_tabs = Rc::clone(&terminal_tabs);
+    let pm_active = Rc::clone(&active_tab_index);
+    ui.on_terminal_pointer_moved(move |x, y| {
+        let active = *pm_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = pm_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) { tab.pointer_moved(x, y); }
+    });
+
+    // terminal-pointer-up
+    let pu_tabs = Rc::clone(&terminal_tabs);
+    let pu_active = Rc::clone(&active_tab_index);
+    ui.on_terminal_pointer_up(move |x, y| {
+        let active = *pu_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = pu_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) { tab.pointer_up(x, y); }
+    });
+
+    // terminal-scroll
+    let scroll_tabs = Rc::clone(&terminal_tabs);
+    let scroll_active = Rc::clone(&active_tab_index);
+    ui.on_terminal_scroll(move |delta_y, x, y| {
+        let active = *scroll_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = scroll_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) { tab.scroll(delta_y, x, y); }
+    });
+
+    // terminal-focus-changed
+    let fc_tabs = Rc::clone(&terminal_tabs);
+    let fc_active = Rc::clone(&active_tab_index);
+    ui.on_terminal_focus_changed(move |focused| {
+        let active = *fc_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = fc_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) { tab.focus_changed(focused); }
+    });
+
+    // session-event-ready
+    let se_tabs = Rc::clone(&terminal_tabs);
+    let se_active = Rc::clone(&active_tab_index);
+    let ui_weak = ui.as_weak();
+    ui.on_session_event_ready(move || {
+        let active = *se_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = se_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            let dirty = tab.drain_session_events();
+            if dirty {
+                if let Some(ui) = ui_weak.upgrade() {
+                    sync_active_terminal_to_ui(&ui, tab);
+                }
+            }
+        }
+    });
+
+    // Timer: update all terminal tabs each frame
+    let timer = Timer::default();
+    let timer_tabs = Rc::clone(&terminal_tabs);
+    let timer_active = Rc::clone(&active_tab_index);
+    let ui_weak = ui.as_weak();
+    timer.start(TimerMode::Repeated, FRAME_INTERVAL, move || {
+        let Some(ui) = ui_weak.upgrade() else { return; };
+        let active = *timer_active.borrow();
+        if active < 0 { return; }
+        let mut tabs = timer_tabs.borrow_mut();
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            let now = Instant::now();
+            let dirty = sync_terminal_tab_layout(&ui, tab);
+            let dirty = dirty || tab.drain_terminal_events();
+            let dirty = dirty || tab.update_cursor_blink(now);
+            if dirty {
+                sync_active_terminal_to_ui(&ui, tab);
+            }
+        }
+    });
+
+    let run_result = ui.run();
+
+    // Cleanup: disconnect all terminal tabs
+    {
+        let tabs = terminal_tabs.borrow();
+        for tab in tabs.iter() {
+            tab.disconnect("窗口关闭");
+        }
+    }
+    runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await; });
+    // Runtime will be dropped when all Rc references are dropped
+    drop(runtime);
+
+    run_result.map_err(Into::into)
+}
+
+// --- Terminal tab management ---
+
+fn open_terminal_tab(
+    ui: &TimonSlintShellWindow,
+    tabs: &Rc<RefCell<Vec<TerminalTab>>>,
+    active_index: &Rc<RefCell<i32>>,
+    workspace: &Rc<RefCell<workspace::WorkspaceData>>,
+    settings: &Rc<AppSettings>,
+    paths: &Rc<AppPaths>,
+    runtime: &Rc<tokio::runtime::Runtime>,
+    connection_id_str: &str,
+) -> Result<String, String> {
+    let connection_id: i64 = connection_id_str.parse().map_err(|_| "Invalid connection ID".to_string())?;
+
+    let ws = workspace.borrow();
+    let connection = ws.connections.iter().find(|c| c.id == connection_id)
+        .ok_or_else(|| "Connection not found".to_string())?
+        .clone();
+    let key = ws.keys.iter().find(|k| Some(k.id) == connection.key_id).cloned();
+    let identity = ws.identities.iter().find(|i| Some(i.id) == connection.identity_id).cloned();
+    let known_hosts_path = paths.known_hosts.clone();
+    let terminal_themes = load_custom_terminal_themes(&paths.themes);
+
+    let mut terminal_settings = settings.terminal.clone();
+    terminal_settings.colors = slint_terminal_colors_for_connection(&terminal_settings, &terminal_themes, &connection.theme_id);
+
+    let terminal_line_height = terminal_settings.font.line_height;
+    let terminal_theme = TerminalTheme::from_settings(&terminal_settings.colors);
+    let terminal_font = TerminalFont::from_settings(&terminal_settings.font);
+    let mut terminal_view = TerminalView::new(TERMINAL_COLS as usize, TERMINAL_ROWS as usize, &terminal_settings);
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let pending_session_events = Arc::new(Mutex::new(VecDeque::new()));
+
+    let session = runtime.block_on(connect_target(
+        ConnectionTarget {
+            connection: connection.clone(),
+            key,
+            identity,
+            known_hosts_path,
+            cols: TERMINAL_COLS,
+            rows: TERMINAL_ROWS,
+        },
+        event_tx,
+    )).map_err(|e| format!("Connection failed: {e}"))?;
+
+    terminal_view.set_outbound(session.command_tx.clone());
+
+    let tab_name = connection.name.clone();
+    let tab_id = format!("terminal-{connection_id}");
+    let tab = TerminalTab::new(
+        tab_id.clone(),
+        tab_name.clone(),
+        terminal_view,
+        session,
+        terminal_theme,
+        terminal_font,
+        terminal_line_height,
+        Arc::clone(&pending_session_events),
+        tab_name.clone(),
+    );
+
+    // Spawn session event forwarder
+    spawn_session_event_forwarder(runtime, event_rx, pending_session_events, ui.as_weak());
+
+    let mut tabs_mut = tabs.borrow_mut();
+    let new_index = tabs_mut.len() as i32;
+    tabs_mut.push(tab);
+    *active_index.borrow_mut() = new_index;
+    ui.set_active_tab_index(new_index);
+    apply_tabs_to_ui(ui, &tabs_mut, new_index);
+    sync_active_terminal_to_ui(ui, &tabs_mut[new_index as usize]);
+
+    Ok(tab_name)
+}
+
+fn apply_tabs_to_ui(ui: &TimonSlintShellWindow, tabs: &[TerminalTab], active_index: i32) {
+    let tab_items: Vec<TabItem> = tabs.iter().enumerate().map(|(i, tab)| {
+        TabItem {
+            id: tab.id.clone().into(),
+            title: tab.window_title.clone().into(),
+            active: i as i32 == active_index,
+            is_terminal: true,
+        }
+    }).collect();
+    ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tab_items)));
+}
+
+fn sync_active_terminal_to_ui(ui: &TimonSlintShellWindow, tab: &TerminalTab) {
+    let snapshot = tab.terminal.snapshot(&tab.theme);
+    let cursor_visible = tab.focused && tab.cursor_visible;
+    let overlay = cursor_overlay_from_snapshot(&snapshot, &tab.font, cursor_visible);
+
+    ui.set_terminal_background(slint_color(tab.theme.background.rgba8()));
+    ui.set_terminal_font_family(tab.font.family_name.clone().into());
+    ui.set_terminal_font_size(tab.font.size);
+    ui.set_terminal_cells(snapshot_to_shell_cells(&snapshot, tab.selection.as_ref(), &tab.font, cursor_visible));
+    ui.set_terminal_decorations(snapshot_to_shell_decorations(&snapshot, &tab.font));
+    ui.set_cursor_overlay_visible(overlay.visible);
+    ui.set_cursor_overlay_x(overlay.x);
+    ui.set_cursor_overlay_y(overlay.y);
+    ui.set_cursor_overlay_width(overlay.width);
+    ui.set_cursor_overlay_height(overlay.height);
+    ui.set_cursor_overlay_color(slint_color(overlay.color.rgba8()));
+
+    // Update tab title in the tab bar
+    apply_tabs_to_ui(ui, &std::slice::from_ref(tab), 0);
+}
+
+fn sync_terminal_tab_layout(ui: &TimonSlintShellWindow, tab: &mut TerminalTab) -> bool {
+    let window = ui.window();
+    let size = window.size();
+    let scale_factor = window.scale_factor();
+    let content_width = size.width.saturating_sub(184);
+    let tab_bar_height: u32 = 36;
+    let content_height = size.height.saturating_sub(52 + tab_bar_height);
+
+    let native_w = ui.get_terminal_native_cell_width();
+    let native_h = ui.get_terminal_native_cell_height();
+    let mut dirty = tab.sync_font_metrics(native_w, native_h);
+    dirty |= tab.sync_window_size(content_width, content_height, scale_factor);
+    dirty
+}
+
+fn spawn_session_event_forwarder(
+    runtime: &tokio::runtime::Runtime,
+    mut event_rx: tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+    pending_session_events: Arc<Mutex<VecDeque<SessionEvent>>>,
+    ui_weak: slint::Weak<TimonSlintShellWindow>,
+) {
+    runtime.spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if let Ok(mut pending) = pending_session_events.lock() {
+                pending.push_back(event);
+            }
+            let ui_weak = ui_weak.clone();
+            let _ = ui_weak.upgrade_in_event_loop(|ui| {
+                ui.invoke_session_event_ready();
+            });
+        }
+    });
+}
+
+fn slint_terminal_colors_for_connection(
+    settings: &TerminalSettings,
+    themes: &[TerminalThemeEntry],
+    theme_id: &str,
+) -> TerminalColors {
+    let id = if theme_id.is_empty() { &settings.default_theme_id } else { theme_id };
+    if let Some(entry) = builtin_terminal_theme_by_id(id) {
+        return entry.colors.clone();
+    }
+    if let Some(entry) = themes.iter().find(|t| t.id == *id) {
+        return entry.colors.clone();
+    }
+    settings.colors.clone()
 }
 
 fn apply_workspace(
@@ -796,78 +1960,11 @@ fn apply_workspace(
     ui.set_group_count_label(format!("{} groups", workspace.groups.len()).into());
 }
 
-fn launch_status_for_active_menu(active_menu: ManageMenu, selected_connection_id: &str) -> String {
+fn launch_status_for_active_menu(active_menu: ManageMenu, _selected_connection_id: &str) -> String {
     if active_menu != ManageMenu::Connections {
         return "Switch to Connections to open a terminal".into();
     }
-
-    launch_slint_terminal_for_connection(selected_connection_id)
-}
-
-fn launch_slint_terminal_for_connection(selected_connection_id: &str) -> String {
-    let Some(connection_id) = selected_connection_id.parse::<i64>().ok() else {
-        return "Select a connection first".into();
-    };
-
-    let Ok(current_exe) = std::env::current_exe() else {
-        return "Could not locate current executable".into();
-    };
-    let launch = slint_terminal_launch(&current_exe);
-
-    let mut command = Command::new(&launch.executable);
-    if let Some(mode_arg) = launch.mode_arg {
-        command.arg(mode_arg);
-    }
-
-    match command
-        .arg("--connection-id")
-        .arg(connection_id.to_string())
-        .spawn()
-    {
-        Ok(_) => format!("Opening connection #{connection_id}"),
-        Err(error) => format!("Failed to open terminal: {error}"),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SlintTerminalLaunch {
-    executable: PathBuf,
-    mode_arg: Option<&'static str>,
-}
-
-fn slint_terminal_launch(current_exe: &Path) -> SlintTerminalLaunch {
-    if current_exe_is_main_timon(current_exe) {
-        return SlintTerminalLaunch {
-            executable: current_exe.to_path_buf(),
-            mode_arg: Some(SLINT_TERMINAL_MODE_ARG),
-        };
-    }
-
-    SlintTerminalLaunch {
-        executable: slint_terminal_executable_path(current_exe),
-        mode_arg: None,
-    }
-}
-
-fn current_exe_is_main_timon(current_exe: &Path) -> bool {
-    let Some(file_name) = current_exe.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-
-    file_name.eq_ignore_ascii_case(if cfg!(windows) { "Timon.exe" } else { "Timon" })
-}
-
-fn slint_terminal_executable_path(current_exe: &Path) -> PathBuf {
-    let executable_name = if cfg!(windows) {
-        "TimonSlintTerminal.exe"
-    } else {
-        "TimonSlintTerminal"
-    };
-
-    current_exe
-        .parent()
-        .map(|parent| parent.join(executable_name))
-        .unwrap_or_else(|| PathBuf::from(executable_name))
+    "Opening terminal...".into()
 }
 
 fn nav_items(active_menu: ManageMenu) -> Vec<ShellNavItem> {

@@ -375,25 +375,14 @@ pub(crate) fn cell_in_selection(
 }
 
 pub(crate) fn main_window_settings() -> window::Settings {
-    #[allow(unused_mut)]
-    let mut settings = window::Settings {
+    window::Settings {
         size: iced::Size::new(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT),
         min_size: Some(iced::Size::new(
             MAIN_WINDOW_MIN_WIDTH,
             MAIN_WINDOW_MIN_HEIGHT,
         )),
-        transparent: true,
         ..window::Settings::default()
-    };
-
-    #[cfg(target_os = "macos")]
-    {
-        settings.platform_specific.title_hidden = true;
-        settings.platform_specific.titlebar_transparent = true;
-        settings.platform_specific.fullsize_content_view = true;
     }
-
-    settings
 }
 
 pub(crate) fn settings_window_settings() -> window::Settings {

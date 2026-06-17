@@ -9,6 +9,8 @@ mod models;
 mod persistence;
 mod session;
 #[cfg(feature = "slint-ui")]
+mod slint_args;
+#[cfg(feature = "slint-ui")]
 mod slint_shell_app;
 #[cfg(feature = "slint-ui")]
 mod slint_terminal;
@@ -46,7 +48,7 @@ fn slint_ui_mode(args: impl IntoIterator<Item = String>) -> SlintUiMode {
     let mut forwarded_args = Vec::new();
 
     for arg in args {
-        if arg == slint_terminal_app::SLINT_TERMINAL_MODE_ARG {
+        if arg == slint_args::SLINT_TERMINAL_MODE_ARG {
             terminal_mode = true;
         } else {
             forwarded_args.push(arg);
@@ -73,7 +75,7 @@ mod tests {
     fn slint_ui_mode_strips_internal_terminal_arg() {
         assert_eq!(
             slint_ui_mode(vec![
-                slint_terminal_app::SLINT_TERMINAL_MODE_ARG.into(),
+                slint_args::SLINT_TERMINAL_MODE_ARG.into(),
                 "--connection-id".into(),
                 "42".into()
             ]),

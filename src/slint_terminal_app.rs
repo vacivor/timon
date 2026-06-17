@@ -34,7 +34,6 @@ const SLINT_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const SLINT_MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const SLINT_CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(600);
 const DEFAULT_SLINT_WINDOW_TITLE: &str = "Timon Slint Terminal";
-pub const SLINT_TERMINAL_MODE_ARG: &str = "--slint-terminal";
 
 struct LiveTerminal {
     terminal: TerminalView,

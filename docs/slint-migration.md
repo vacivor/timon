@@ -1,6 +1,8 @@
 # Slint Migration Blueprint
 
-This application is currently built around an `iced` runtime with three large UI-coupled areas:
+The default `Timon` binary now launches the Slint shell and Slint terminal path. The legacy `iced`
+application is still retained behind the explicit `iced-ui` feature while the remaining migration
+surface is completed. The old UI-coupled areas are:
 
 - `src/app/view.rs`
 - `src/app/update.rs`
@@ -12,7 +14,7 @@ It also has three important non-UI subsystems that we should preserve:
 - `src/session.rs`: local shell, SSH, SFTP, port forwarding
 - `src/terminal.rs`: terminal model, input encoding, custom renderer
 
-The safest migration path is not a one-shot rewrite. Instead, we should move to Slint in phases while keeping the current application runnable.
+The safest migration path is not a one-shot rewrite. Instead, we are moving to Slint in phases while keeping both the default Slint application and the explicit legacy iced fallback runnable.
 
 ## Phase 1: Shared Core
 
@@ -41,7 +43,8 @@ Current progress:
 - `Cargo.toml` keeps the legacy `bytemuck` dependency behind `iced-ui`, because it is only needed by the old wgpu glyph-atlas renderer and not by the Slint terminal path
 - `Cargo.toml` defines the `TimonSlintTerminal` binary for terminal-first migration work
 - `src/slint_terminal_app.rs` now owns the reusable Slint terminal entry point, while `src/slint_main.rs` is only the thin `TimonSlintTerminal` binary wrapper
-- `src/main.rs` can route `Timon --features slint-ui -- --slint-terminal` into the same Slint terminal entry point and strips that internal mode argument before handing the rest of the CLI args to `src/slint_terminal_app.rs`
+- `src/slint_args.rs` owns the shared internal `--slint-terminal` mode argument used by the Slint main binary and shell launcher
+- `src/main.rs` routes default Slint `Timon -- --slint-terminal` launches into the same Slint terminal entry point and strips that internal mode argument before handing the rest of the CLI args to `src/slint_terminal_app.rs`
 - `src/slint_terminal_core.rs` owns a Slint-specific terminal model bridge built on `alacritty_terminal`
 - `src/slint_terminal.rs` renders terminal cells with Slint-native `Rectangle` and `Text` repeaters
 - `src/slint_terminal_app.rs` starts a live local PTY session and refreshes Slint cell models from terminal output
@@ -142,7 +145,7 @@ Goal: port the management surface after the terminal rendering path is establish
 Current progress:
 
 - `Cargo.toml` defines the `TimonSlintShell` binary for management-shell migration work
-- `src/slint_shell_app.rs` now owns the reusable Slint shell entry point, so both `TimonSlintShell` and the main `Timon` binary can launch the same Slint shell when built with `--features slint-ui`
+- `src/slint_shell_app.rs` now owns the reusable Slint shell entry point, so both `TimonSlintShell` and the default main `Timon` binary can launch the same Slint shell
 - `src/slint_shell_app.rs` loads `WorkspaceData` from the existing SQLite-backed persistence layer
 - `src/slint_shell_app.rs` renders a first Slint-native management shell with top bar, sidebar, workspace stats, and connection rows
 - `src/slint_shell_app.rs` maps `Connection` models into Slint view models for SSH, local shell, and serial targets
@@ -154,6 +157,7 @@ Current progress:
 - `src/slint_terminal_app.rs` now resolves terminal colors from the selected connection theme id, including settings default colors, built-in themes, custom themes, and atom-one-light fallback
 - `src/slint_shell_app.rs` now opens terminals from connection rows directly and guards the Connect action so non-connection pages cannot trigger terminal launches
 - `src/slint_shell_app.rs` now launches terminal windows through the current main `Timon` binary when running under the Slint main entry point, and falls back to the sibling `TimonSlintTerminal` wrapper for standalone shell builds
+- macOS packaging scripts now build the configured app binary explicitly, so normal Timon packages include the default Slint main entry point without relying on standalone migration wrapper binaries
 - `src/slint_shell_app.rs` now has a real search input that filters Connections, Keychain, Port Forwarding, and Known Hosts data through Rust-side view models
 - `src/slint_shell_app.rs` now renders a real Settings summary page from persisted app settings, including terminal font, theme, scrollback, cursor, and shortcut data
 - `src/slint_shell_app.rs` now renders an in-memory Logs page for Slint shell startup, navigation, search, and terminal-launch events, capped like the legacy iced log buffer
@@ -161,20 +165,18 @@ Current progress:
 - `src/main.rs` now launches `slint_shell_app::run()` for the default main `Timon` binary because `slint-ui` is the default feature; the legacy iced application remains available only when building with `--no-default-features --features iced-ui`
 - Slint shell is intentionally read-oriented for now: it navigates, searches, displays persisted data, and opens the Slint terminal without adding new create/delete/start/stop behavior during the migration
 
-Suggested scope for the first management Slint shell:
+Remaining management Slint scope:
 
-- top bar
-- sidebar
-- connections list
-- drawers for create/edit flows
-- logs/settings entry points
+- replace the read-only shell panels with real create/edit/delete flows once shared services are extracted
+- connect SFTP and port forwarding state updates through a UI-neutral session bridge
+- keep the legacy iced management implementation available only as a fallback until those flows are covered
 
 ## Recommended Order
 
-1. Continue extracting shared core/services from `App`
-2. Bring the Slint terminal core to behavior parity with the old iced terminal
-3. Expand Slint keyboard handling to match the full old terminal input protocol
-4. Port the management UI once terminal behavior has parity
+1. Continue extracting shared core/services from the legacy `App`
+2. Keep closing terminal parity gaps in the Slint terminal core as they are found
+3. Move session lifecycle events into a UI-neutral bridge
+4. Replace the remaining read-only Slint management panels with migrated workflows
 
 ## Practical Constraint
 

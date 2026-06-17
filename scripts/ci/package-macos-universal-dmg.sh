@@ -12,8 +12,8 @@ VERSION="${VERSION:-$(sed -n 's/^version = \"\(.*\)\"$/\1/p' Cargo.toml | head -
 ARCHIVE_PREFIX="${ARCHIVE_PREFIX:-timon-macos-universal}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
-cargo build --locked --profile "${PROFILE}" --target "${ARM_TRIPLE}"
-cargo build --locked --profile "${PROFILE}" --target "${X64_TRIPLE}"
+cargo build --locked --profile "${PROFILE}" --target "${ARM_TRIPLE}" --bin "${BINARY_NAME}"
+cargo build --locked --profile "${PROFILE}" --target "${X64_TRIPLE}" --bin "${BINARY_NAME}"
 
 BUILD_ROOT="${DIST_DIR}/macos/universal"
 APP_DIR="${BUILD_ROOT}/${APP_NAME}.app"

@@ -2,6 +2,7 @@
 
 mod models;
 mod persistence;
+mod slint_args;
 mod slint_shell_app;
 mod workspace;
 

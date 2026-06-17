@@ -10,11 +10,11 @@ use crate::models::{
     PortForward, Snippet,
 };
 use crate::persistence::{AppPaths, AppSettings, Database, load_settings};
+use crate::slint_args::SLINT_TERMINAL_MODE_ARG;
 use crate::workspace;
 use slint::ComponentHandle;
 
 const SHELL_LOG_LIMIT: usize = 200;
-const SLINT_TERMINAL_MODE_ARG: &str = "--slint-terminal";
 
 slint::slint! {
     import { LineEdit } from "std-widgets.slint";
@@ -1651,6 +1651,17 @@ mod tests {
         } else {
             Path::new("/Applications/Timon")
         };
+
+        let launch = slint_terminal_launch(current_exe);
+
+        assert_eq!(launch.executable, current_exe);
+        assert_eq!(launch.mode_arg, Some(SLINT_TERMINAL_MODE_ARG));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn slint_terminal_launch_reuses_packaged_macos_timon_binary() {
+        let current_exe = Path::new("/Applications/Timon.app/Contents/MacOS/Timon");
 
         let launch = slint_terminal_launch(current_exe);
 

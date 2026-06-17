@@ -19,7 +19,7 @@ has_output() {
   esac
 }
 
-cargo build --locked --profile "${PROFILE}" --target "${TARGET_TRIPLE}"
+cargo build --locked --profile "${PROFILE}" --target "${TARGET_TRIPLE}" --bin "${BINARY_NAME}"
 
 BUILD_ROOT="${DIST_DIR}/macos/${TARGET_TRIPLE}"
 APP_DIR="${BUILD_ROOT}/${APP_NAME}.app"

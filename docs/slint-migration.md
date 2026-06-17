@@ -36,7 +36,8 @@ Goal: move terminal rendering into a Slint-hosted surface first.
 Current progress:
 
 - `Cargo.toml` defines the optional `slint-ui` feature
-- `Cargo.toml` keeps the legacy iced app behind the default `iced-ui` feature; pure Slint migration builds should use `--no-default-features --features slint-ui` so they do not pull in `iced` / `iced_wgpu`
+- `Cargo.toml` now makes `slint-ui` the default feature, so normal `cargo run --bin Timon` and macOS packaging builds launch the Slint shell path
+- `Cargo.toml` keeps the legacy iced app behind an explicit `iced-ui` feature; legacy validation should use `--no-default-features --features iced-ui`
 - `Cargo.toml` keeps the legacy `bytemuck` dependency behind `iced-ui`, because it is only needed by the old wgpu glyph-atlas renderer and not by the Slint terminal path
 - `Cargo.toml` defines the `TimonSlintTerminal` binary for terminal-first migration work
 - `src/slint_terminal_app.rs` now owns the reusable Slint terminal entry point, while `src/slint_main.rs` is only the thin `TimonSlintTerminal` binary wrapper
@@ -157,7 +158,7 @@ Current progress:
 - `src/slint_shell_app.rs` now renders a real Settings summary page from persisted app settings, including terminal font, theme, scrollback, cursor, and shortcut data
 - `src/slint_shell_app.rs` now renders an in-memory Logs page for Slint shell startup, navigation, search, and terminal-launch events, capped like the legacy iced log buffer
 - `src/models.rs`, `src/persistence.rs`, `src/workspace.rs`, and `src/slint_shell_app.rs` now include persisted Snippets and render/search them in the Slint shell instead of showing a placeholder page
-- `src/main.rs` keeps the legacy iced application as the default entry point, but switches the main `Timon` binary to `slint_shell_app::run()` when the `slint-ui` feature is enabled
+- `src/main.rs` now launches `slint_shell_app::run()` for the default main `Timon` binary because `slint-ui` is the default feature; the legacy iced application remains available only when building with `--no-default-features --features iced-ui`
 - Slint shell is intentionally read-oriented for now: it navigates, searches, displays persisted data, and opens the Slint terminal without adding new create/delete/start/stop behavior during the migration
 
 Suggested scope for the first management Slint shell:

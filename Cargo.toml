@@ -24,7 +24,7 @@ toml = "1.1.2+spec-1.1.0"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [features]
-default = ["iced-ui"]
+default = ["slint-ui"]
 iced-ui = ["dep:bytemuck", "dep:iced", "dep:iced_wgpu"]
 slint-ui = ["dep:slint"]
 

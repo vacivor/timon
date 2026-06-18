@@ -43,7 +43,7 @@ Current progress:
 - `Cargo.toml` keeps the legacy `bytemuck` dependency behind `iced-ui`, because it is only needed by the old wgpu glyph-atlas renderer and not by the Slint terminal path
 - `Cargo.toml` defines the `TimonSlintTerminal` binary for terminal-first migration work
 - `src/slint_terminal_app.rs` now owns the reusable Slint terminal entry point, while `src/slint_main.rs` is only the thin `TimonSlintTerminal` binary wrapper
-- `src/slint_args.rs` owns the shared internal `--slint-terminal` mode argument used by the Slint main binary and shell launcher
+- `src/slint_args.rs` owns the internal `--slint-terminal` mode argument used by the default Slint main binary
 - `src/main.rs` routes default Slint `Timon -- --slint-terminal` launches into the same Slint terminal entry point and strips that internal mode argument before handing the rest of the CLI args to `src/slint_terminal_app.rs`
 - `src/slint_terminal_core.rs` owns a Slint-specific terminal model bridge built on `alacritty_terminal`
 - `src/slint_terminal.rs` renders terminal cells with Slint-native `Rectangle` and `Text` repeaters
@@ -153,10 +153,10 @@ Current progress:
 - `src/slint_shell_app.rs` includes connection group names in read-only connection summaries and Connections search filtering
 - `src/slint_shell_app.rs` now supports selecting connection rows and showing selected connection details in the Slint shell
 - `src/slint_shell_app.rs` now handles sidebar navigation state and renders Slint-native read-only list panels with explicit empty states for migrated management pages
-- `src/slint_shell_app.rs` can launch the Slint terminal binary for the selected connection, and `src/slint_terminal_app.rs` accepts `--connection-id` to open a persisted connection with its effective key/identity
+- `src/slint_shell_app.rs` now opens embedded Slint terminal tabs for selected connections without spawning a separate terminal wrapper binary
 - `src/slint_terminal_app.rs` now resolves terminal colors from the selected connection theme id, including settings default colors, built-in themes, custom themes, and atom-one-light fallback
 - `src/slint_shell_app.rs` now opens terminals from connection rows directly and guards the Connect action so non-connection pages cannot trigger terminal launches
-- `src/slint_shell_app.rs` now launches terminal windows through the current main `Timon` binary when running under the Slint main entry point, and falls back to the sibling `TimonSlintTerminal` wrapper for standalone shell builds
+- standalone `TimonSlintTerminal` remains available for focused terminal migration and accepts `--connection-id` to open a persisted connection with its effective key/identity
 - macOS packaging scripts now build the configured app binary explicitly, so normal Timon packages include the default Slint main entry point without relying on standalone migration wrapper binaries
 - `src/slint_shell_app.rs` now has a real search input that filters Connections, Keychain, Port Forwarding, and Known Hosts data through Rust-side view models
 - `src/slint_shell_app.rs` now renders a real Settings summary page from persisted app settings, including terminal font, theme, scrollback, cursor, and shortcut data

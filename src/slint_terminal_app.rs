@@ -12,7 +12,6 @@ use crate::persistence::{
     AppPaths, Database, TerminalColors, TerminalSettings, TerminalThemeEntry,
     builtin_terminal_theme_by_id, load_custom_terminal_themes, load_settings,
 };
-use slint::winit_030::winit;
 use crate::session::{
     ConnectionTarget, SessionCommand, SessionEvent, SessionHandle, connect_target,
 };
@@ -27,6 +26,7 @@ use crate::workspace;
 use crate::{persistence, slint_terminal_core};
 use alacritty_terminal::vte::ansi::CursorShape;
 use copypasta::{ClipboardContext, ClipboardProvider};
+use slint::winit_030::winit;
 use slint::{ComponentHandle, Timer, TimerMode};
 
 const SLINT_TERMINAL_COLS: u16 = 96;

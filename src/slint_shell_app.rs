@@ -17,7 +17,6 @@ use crate::persistence::{
 use crate::session::{
     ConnectionTarget, SessionCommand, SessionEvent, SessionHandle, connect_target,
 };
-use crate::slint_args::SLINT_TERMINAL_MODE_ARG;
 use crate::slint_terminal_core::{
     TerminalCell, TerminalColor, TerminalEvent, TerminalFont, TerminalKeyModifiers, TerminalPoint,
     TerminalSelection, TerminalSnapshot, TerminalTheme, TerminalUnderlineStyle, TerminalView,
@@ -157,11 +156,13 @@ impl TerminalTab {
                     dirty = true;
                 }
                 SessionEvent::Error(message) => {
-                    self.terminal.push_local_line(&format!("Disconnected: {message}"));
+                    self.terminal
+                        .push_local_line(&format!("Disconnected: {message}"));
                     dirty = true;
                 }
                 SessionEvent::Disconnected(reason) => {
-                    self.terminal.push_local_line(&format!("Disconnected: {reason}"));
+                    self.terminal
+                        .push_local_line(&format!("Disconnected: {reason}"));
                     dirty = true;
                 }
                 SessionEvent::Connected { .. } | SessionEvent::Status(_) => {}
@@ -213,11 +214,13 @@ impl TerminalTab {
     }
 
     fn sync_font_metrics(&mut self, native_cell_width: f32, native_cell_height: f32) -> bool {
-        self.font.apply_native_metrics(native_cell_width, native_cell_height, self.line_height)
+        self.font
+            .apply_native_metrics(native_cell_width, native_cell_height, self.line_height)
     }
 
     fn sync_window_size(&mut self, pixel_width: u32, pixel_height: u32, scale_factor: f32) -> bool {
-        let Some(grid) = terminal_grid_size(pixel_width, pixel_height, scale_factor, &self.font) else {
+        let Some(grid) = terminal_grid_size(pixel_width, pixel_height, scale_factor, &self.font)
+        else {
             return false;
         };
         let dimensions_changed = grid.0 != self.cols || grid.1 != self.rows;
@@ -244,20 +247,32 @@ impl TerminalTab {
 
     fn scroll(&mut self, delta_y: f32, x: f32, y: f32) -> bool {
         let Some(point) = self.terminal.point_for_logical_position(
-            x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+            x,
+            y,
+            self.font.metrics.cell_width,
+            self.font.metrics.cell_height,
         ) else {
             return false;
         };
         let lines = delta_y / self.font.metrics.cell_height.max(1.0);
-        let lines = if lines.abs() < 1.0 { lines.signum() as i32 } else { lines.round() as i32 };
-        if lines == 0 { return false; }
+        let lines = if lines.abs() < 1.0 {
+            lines.signum() as i32
+        } else {
+            lines.round() as i32
+        };
+        if lines == 0 {
+            return false;
+        }
         self.terminal.handle_scroll(lines, point);
         true
     }
 
     fn pointer_down(&mut self, x: f32, y: f32) -> bool {
         let Some(point) = self.terminal.point_for_logical_position(
-            x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+            x,
+            y,
+            self.font.metrics.cell_width,
+            self.font.metrics.cell_height,
         ) else {
             self.dragging_selection = false;
             return false;
@@ -273,7 +288,11 @@ impl TerminalTab {
         let is_multi_click = self.last_click_at.map_or(false, |t| {
             now.duration_since(t) < MULTI_CLICK_INTERVAL && self.last_click_point == Some(point)
         });
-        self.click_count = if is_multi_click { (self.click_count + 1).min(3) } else { 1 };
+        self.click_count = if is_multi_click {
+            (self.click_count + 1).min(3)
+        } else {
+            1
+        };
         self.last_click_at = Some(now);
         self.last_click_point = Some(point);
         self.dragging_selection = true;
@@ -281,13 +300,22 @@ impl TerminalTab {
         self.selection = match self.click_count {
             2 => {
                 let sel = self.terminal.word_selection_at_point(&self.theme, point);
-                Some(TerminalSelection { start: sel.start, end: sel.end })
+                Some(TerminalSelection {
+                    start: sel.start,
+                    end: sel.end,
+                })
             }
             3 => {
                 let sel = self.terminal.token_selection_at_point(&self.theme, point);
-                Some(TerminalSelection { start: sel.start, end: sel.end })
+                Some(TerminalSelection {
+                    start: sel.start,
+                    end: sel.end,
+                })
             }
-            _ => Some(TerminalSelection { start: point, end: point }),
+            _ => Some(TerminalSelection {
+                start: point,
+                end: point,
+            }),
         };
         self.selection.is_some()
     }
@@ -295,13 +323,23 @@ impl TerminalTab {
     fn pointer_moved(&mut self, x: f32, y: f32) -> bool {
         if self.terminal_mouse_button_down {
             let Some(point) = self.terminal.point_for_logical_position(
-                x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
-            ) else { return false; };
+                x,
+                y,
+                self.font.metrics.cell_width,
+                self.font.metrics.cell_height,
+            ) else {
+                return false;
+            };
             return self.terminal.handle_mouse_drag(point);
         }
-        if !self.dragging_selection { return false; }
+        if !self.dragging_selection {
+            return false;
+        }
         let point = self.terminal.clamped_point_for_logical_position(
-            x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+            x,
+            y,
+            self.font.metrics.cell_width,
+            self.font.metrics.cell_height,
         );
         if self.click_count >= 2 {
             let anchor = self.selection_anchor.unwrap_or(point);
@@ -313,11 +351,26 @@ impl TerminalTab {
                 (sel.start, sel.end)
             };
             let norm = normalize_selection(anchor, point);
-            let merged_start = if (new_start.line, new_start.column) < (norm.start.line, norm.start.column) { new_start } else { norm.start };
-            let merged_end = if (new_end.line, new_end.column) > (norm.end.line, norm.end.column) { new_end } else { norm.end };
-            self.selection = Some(TerminalSelection { start: merged_start, end: merged_end });
+            let merged_start =
+                if (new_start.line, new_start.column) < (norm.start.line, norm.start.column) {
+                    new_start
+                } else {
+                    norm.start
+                };
+            let merged_end = if (new_end.line, new_end.column) > (norm.end.line, norm.end.column) {
+                new_end
+            } else {
+                norm.end
+            };
+            self.selection = Some(TerminalSelection {
+                start: merged_start,
+                end: merged_end,
+            });
         } else {
-            self.selection = Some(TerminalSelection { start: self.selection_anchor.unwrap_or(point), end: point });
+            self.selection = Some(TerminalSelection {
+                start: self.selection_anchor.unwrap_or(point),
+                end: point,
+            });
         }
         true
     }
@@ -325,7 +378,10 @@ impl TerminalTab {
     fn pointer_up(&mut self, x: f32, y: f32) {
         if self.terminal_mouse_button_down {
             if let Some(point) = self.terminal.point_for_logical_position(
-                x, y, self.font.metrics.cell_width, self.font.metrics.cell_height,
+                x,
+                y,
+                self.font.metrics.cell_width,
+                self.font.metrics.cell_height,
             ) {
                 self.terminal.handle_mouse_release(point);
             }
@@ -336,10 +392,15 @@ impl TerminalTab {
     }
 
     fn focus_changed(&mut self, focused: bool) -> bool {
-        if self.focused == focused { return false; }
+        if self.focused == focused {
+            return false;
+        }
         self.focused = focused;
         self.terminal.handle_focus_change(focused);
-        if focused { self.cursor_visible = true; self.cursor_blink_started_at = Instant::now(); }
+        if focused {
+            self.cursor_visible = true;
+            self.cursor_blink_started_at = Instant::now();
+        }
         !focused && self.selection.is_some()
     }
 
@@ -355,11 +416,17 @@ impl TerminalTab {
     }
 
     fn send_terminal_input(&mut self, bytes: Vec<u8>) -> bool {
-        self.session.command_tx.send(SessionCommand::Input(bytes)).is_ok()
+        self.session
+            .command_tx
+            .send(SessionCommand::Input(bytes))
+            .is_ok()
     }
 
     fn disconnect(&self, reason: &str) {
-        let _ = self.session.command_tx.send(SessionCommand::Disconnect(reason.to_string()));
+        let _ = self
+            .session
+            .command_tx
+            .send(SessionCommand::Disconnect(reason.to_string()));
     }
 }
 
@@ -368,11 +435,16 @@ fn cursor_visible_for_elapsed(elapsed: Duration) -> bool {
 }
 
 fn terminal_grid_size(
-    pixel_width: u32, pixel_height: u32, scale_factor: f32, font: &TerminalFont,
+    pixel_width: u32,
+    pixel_height: u32,
+    scale_factor: f32,
+    font: &TerminalFont,
 ) -> Option<(usize, usize)> {
     let cell_width = font.metrics.cell_width;
     let cell_height = font.metrics.cell_height;
-    if cell_width <= 0.0 || cell_height <= 0.0 { return None; }
+    if cell_width <= 0.0 || cell_height <= 0.0 {
+        return None;
+    }
     let logical_width = pixel_width as f32 / scale_factor.max(1.0);
     let logical_height = pixel_height as f32 / scale_factor.max(1.0);
     let cols = (logical_width / cell_width).floor().max(1.0) as usize;
@@ -507,7 +579,7 @@ slint::slint! {
             text: stat.value;
             color: #111827;
             font-size: 24px;
-            font-weight: 800;
+            font-weight: 700;
         }
 
         Text {
@@ -547,7 +619,7 @@ slint::slint! {
                 text: connection.initial;
                 color: #ffffff;
                 font-size: 14px;
-                font-weight: 800;
+                font-weight: 700;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -628,7 +700,7 @@ slint::slint! {
                 text: item.initial;
                 color: #ffffff;
                 font-size: 14px;
-                font-weight: 800;
+                font-weight: 700;
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -789,7 +861,7 @@ slint::slint! {
                 text: "Timon";
                 color: #111827;
                 font-size: 18px;
-                font-weight: 800;
+                font-weight: 700;
             }
 
             for item[index] in root.nav-items: NavRow {
@@ -968,7 +1040,7 @@ slint::slint! {
                     text: root.page-title;
                     color: #111827;
                     font-size: 18px;
-                    font-weight: 800;
+                    font-weight: 700;
                 }
 
                 Text {
@@ -1029,7 +1101,7 @@ slint::slint! {
                         text: root.selected-connection-name;
                         color: #111827;
                         font-size: 15px;
-                        font-weight: 800;
+                        font-weight: 700;
                         overflow: elide;
                     }
 
@@ -1073,7 +1145,7 @@ slint::slint! {
                     text: "Groups";
                     color: #111827;
                     font-size: 15px;
-                    font-weight: 800;
+                    font-weight: 700;
                     visible: root.active-menu-index == 0;
                 }
 
@@ -1092,7 +1164,7 @@ slint::slint! {
                     text: root.page-title;
                     color: #111827;
                     font-size: 15px;
-                    font-weight: 800;
+                    font-weight: 700;
                     visible: root.active-menu-index != 0;
                 }
 
@@ -1104,7 +1176,7 @@ slint::slint! {
                     text: "Connections";
                     color: #111827;
                     font-size: 15px;
-                    font-weight: 800;
+                    font-weight: 700;
                     visible: root.active-menu-index == 0;
                 }
 
@@ -1233,30 +1305,50 @@ fn slint_color([r, g, b, a]: [u8; 4]) -> slint::Color {
 }
 
 fn slint_selection_contains(selection: Option<&TerminalSelection>, cell: &TerminalCell) -> bool {
-    let Some(sel) = selection else { return false; };
+    let Some(sel) = selection else {
+        return false;
+    };
     let norm = normalize_selection(sel.start, sel.end);
     let p = (cell.line, cell.column);
     p >= (norm.start.line, norm.start.column) && p <= (norm.end.line, norm.end.column)
 }
 
 fn slint_cursor_covers_cell(snapshot: &TerminalSnapshot, cell: &TerminalCell) -> bool {
-    if !snapshot.show_cursor { return false; }
+    if !snapshot.show_cursor {
+        return false;
+    }
     let cursor_col = snapshot.cursor_column;
     let cursor_line = snapshot.cursor_line;
-    if cell.line != cursor_line { return false; }
+    if cell.line != cursor_line {
+        return false;
+    }
     cell.column >= cursor_col && cell.column < cursor_col + snapshot.cursor_width
 }
 
 fn cursor_overlay_from_snapshot(
-    snapshot: &TerminalSnapshot, font: &TerminalFont, cursor_visible: bool,
+    snapshot: &TerminalSnapshot,
+    font: &TerminalFont,
+    cursor_visible: bool,
 ) -> CursorOverlay {
     if !cursor_visible || !snapshot.show_cursor {
-        return CursorOverlay { visible: false, x: 0.0, y: 0.0, width: 0.0, height: 0.0, color: snapshot.cursor_color };
+        return CursorOverlay {
+            visible: false,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            color: snapshot.cursor_color,
+        };
     }
     match snapshot.cursor_shape {
-        CursorShape::Block | CursorShape::Hidden => {
-            CursorOverlay { visible: false, x: 0.0, y: 0.0, width: 0.0, height: 0.0, color: snapshot.cursor_color }
-        }
+        CursorShape::Block | CursorShape::Hidden => CursorOverlay {
+            visible: false,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            color: snapshot.cursor_color,
+        },
         CursorShape::Beam => {
             let beam_width = font.metrics.cell_width.max(2.0);
             CursorOverlay {
@@ -1283,35 +1375,57 @@ fn cursor_overlay_from_snapshot(
 }
 
 fn snapshot_to_shell_cells(
-    snapshot: &TerminalSnapshot, selection: Option<&TerminalSelection>, font: &TerminalFont,
+    snapshot: &TerminalSnapshot,
+    selection: Option<&TerminalSelection>,
+    font: &TerminalFont,
     cursor_visible: bool,
 ) -> slint::ModelRc<TerminalCellItem> {
-    let cells = snapshot.cells.iter().map(|cell| {
-        let selected = slint_selection_contains(selection, cell);
-        let cursor_on_cell = slint_cursor_covers_cell(snapshot, cell);
-        let foreground = if cursor_on_cell && cursor_visible && snapshot.show_cursor
-            && matches!(snapshot.cursor_shape, CursorShape::Block)
-        {
-            snapshot.cursor_text
-        } else if selected { snapshot.selection_foreground } else { cell.fg };
-        let background = if cursor_on_cell && cursor_visible && snapshot.show_cursor
-            && matches!(snapshot.cursor_shape, CursorShape::Block)
-        {
-            snapshot.cursor_color
-        } else if selected { snapshot.selection_background } else { cell.bg };
+    let cells = snapshot
+        .cells
+        .iter()
+        .map(|cell| {
+            let selected = slint_selection_contains(selection, cell);
+            let cursor_on_cell = slint_cursor_covers_cell(snapshot, cell);
+            let foreground = if cursor_on_cell
+                && cursor_visible
+                && snapshot.show_cursor
+                && matches!(snapshot.cursor_shape, CursorShape::Block)
+            {
+                snapshot.cursor_text
+            } else if selected {
+                snapshot.selection_foreground
+            } else {
+                cell.fg
+            };
+            let background = if cursor_on_cell
+                && cursor_visible
+                && snapshot.show_cursor
+                && matches!(snapshot.cursor_shape, CursorShape::Block)
+            {
+                snapshot.cursor_color
+            } else if selected {
+                snapshot.selection_background
+            } else {
+                cell.bg
+            };
 
-        TerminalCellItem {
-            text: if cell.hidden { "".into() } else { cell.text.clone().into() },
-            x: cell.column as f32 * font.metrics.cell_width,
-            y: cell.line as f32 * font.metrics.cell_height,
-            width: cell.width.max(1) as f32 * font.metrics.cell_width,
-            height: font.metrics.cell_height,
-            foreground: slint_color(foreground.rgba8()),
-            background: slint_color(background.rgba8()),
-            bold: cell.bold,
-            italic: cell.italic,
-        }
-    }).collect::<Vec<_>>();
+            TerminalCellItem {
+                text: if cell.hidden {
+                    "".into()
+                } else {
+                    cell.text.clone().into()
+                },
+                x: cell.column as f32 * font.metrics.cell_width,
+                y: cell.line as f32 * font.metrics.cell_height,
+                width: cell.width.max(1) as f32 * font.metrics.cell_width,
+                height: font.metrics.cell_height,
+                foreground: slint_color(foreground.rgba8()),
+                background: slint_color(background.rgba8()),
+                bold: cell.bold,
+                italic: cell.italic,
+            }
+        })
+        .collect::<Vec<_>>();
     slint::ModelRc::new(slint::VecModel::from(cells))
 }
 
@@ -1320,28 +1434,53 @@ fn decoration_stroke_width(font: &TerminalFont) -> f32 {
 }
 
 fn snapshot_to_shell_decorations(
-    snapshot: &TerminalSnapshot, font: &TerminalFont,
+    snapshot: &TerminalSnapshot,
+    font: &TerminalFont,
 ) -> slint::ModelRc<TerminalDecorationItem> {
     let mut decorations = Vec::new();
     for cell in &snapshot.cells {
-        if cell.hidden { continue; }
+        if cell.hidden {
+            continue;
+        }
         let x = cell.column as f32 * font.metrics.cell_width;
         let y = cell.line as f32 * font.metrics.cell_height;
         let width = cell.width.max(1) as f32 * font.metrics.cell_width;
         let height = font.metrics.cell_height;
         if let Some(style) = cell.underline {
-            push_underline(&mut decorations, x, y, width, height, style, cell.underline_color, font);
+            push_underline(
+                &mut decorations,
+                x,
+                y,
+                width,
+                height,
+                style,
+                cell.underline_color,
+                font,
+            );
         }
         if cell.strikeout {
-            push_decoration_rect(&mut decorations, x, y + height * 0.56, width, decoration_stroke_width(font), cell.fg);
+            push_decoration_rect(
+                &mut decorations,
+                x,
+                y + height * 0.56,
+                width,
+                decoration_stroke_width(font),
+                cell.fg,
+            );
         }
     }
     slint::ModelRc::new(slint::VecModel::from(decorations))
 }
 
 fn push_underline(
-    decorations: &mut Vec<TerminalDecorationItem>, x: f32, y: f32, width: f32, height: f32,
-    style: TerminalUnderlineStyle, color: TerminalColor, font: &TerminalFont,
+    decorations: &mut Vec<TerminalDecorationItem>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    style: TerminalUnderlineStyle,
+    color: TerminalColor,
+    font: &TerminalFont,
 ) {
     let stroke = decoration_stroke_width(font);
     let baseline_y = y + height - stroke;
@@ -1351,7 +1490,14 @@ fn push_underline(
         }
         TerminalUnderlineStyle::Double => {
             push_decoration_rect(decorations, x, baseline_y, width, stroke, color);
-            push_decoration_rect(decorations, x, baseline_y - stroke * 2.0, width, stroke, color);
+            push_decoration_rect(
+                decorations,
+                x,
+                baseline_y - stroke * 2.0,
+                width,
+                stroke,
+                color,
+            );
         }
         TerminalUnderlineStyle::Dotted => {
             let gap = (stroke * 2.0).max(2.0);
@@ -1379,7 +1525,11 @@ fn push_underline(
             let mut high = true;
             while cx < x + width {
                 let seg = half_period.min(x + width - cx);
-                let cy = if high { baseline_y - amplitude } else { baseline_y };
+                let cy = if high {
+                    baseline_y - amplitude
+                } else {
+                    baseline_y
+                };
                 push_decoration_rect(decorations, cx, cy, seg, stroke, color);
                 cx += seg;
                 high = !high;
@@ -1389,20 +1539,34 @@ fn push_underline(
 }
 
 fn push_decoration_rect(
-    decorations: &mut Vec<TerminalDecorationItem>, x: f32, y: f32, width: f32, height: f32, color: TerminalColor,
+    decorations: &mut Vec<TerminalDecorationItem>,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: TerminalColor,
 ) {
     decorations.push(TerminalDecorationItem {
-        x, y, width, height,
+        x,
+        y,
+        width,
+        height,
         color: slint_color(color.rgba8()),
     });
 }
 
 fn is_copy_shortcut(text: &str, modifiers: TerminalKeyModifiers) -> bool {
-    (modifiers.control || modifiers.meta) && (text == "c" || text == "C") && !modifiers.alt && !modifiers.shift
+    (modifiers.control || modifiers.meta)
+        && (text == "c" || text == "C")
+        && !modifiers.alt
+        && !modifiers.shift
 }
 
 fn is_paste_shortcut(text: &str, modifiers: TerminalKeyModifiers) -> bool {
-    (modifiers.control || modifiers.meta) && (text == "v" || text == "V") && !modifiers.alt && !modifiers.shift
+    (modifiers.control || modifiers.meta)
+        && (text == "v" || text == "V")
+        && !modifiers.alt
+        && !modifiers.shift
 }
 
 fn write_clipboard(text: String) {
@@ -1444,7 +1608,11 @@ pub fn run() -> anyhow::Result<()> {
         settings.as_ref(),
     )));
 
-    let runtime = Rc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build()?);
+    let runtime = Rc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?,
+    );
     let terminal_tabs: Rc<RefCell<Vec<TerminalTab>>> = Rc::new(RefCell::new(Vec::new()));
     let active_tab_index: Rc<RefCell<i32>> = Rc::new(RefCell::new(-1));
 
@@ -1528,8 +1696,14 @@ pub fn run() -> anyhow::Result<()> {
         if let Some(ui) = ui_weak.upgrade() {
             let selected_id = ui.get_selected_connection_id().to_string();
             let status = match open_terminal_tab(
-                &ui, &connect_tabs, &connect_active, &connect_workspace,
-                &connect_settings, &connect_paths, &connect_runtime, &selected_id,
+                &ui,
+                &connect_tabs,
+                &connect_active,
+                &connect_workspace,
+                &connect_settings,
+                &connect_paths,
+                &connect_runtime,
+                &selected_id,
             ) {
                 Ok(tab_name) => format!("Opened terminal: {tab_name}"),
                 Err(e) => e,
@@ -1551,8 +1725,14 @@ pub fn run() -> anyhow::Result<()> {
     ui.on_open_connection(move |connection_id| {
         if let Some(ui) = ui_weak.upgrade() {
             let status = match open_terminal_tab(
-                &ui, &open_tabs, &open_active, &open_workspace,
-                &open_settings, &open_paths, &open_runtime, connection_id.as_str(),
+                &ui,
+                &open_tabs,
+                &open_active,
+                &open_workspace,
+                &open_settings,
+                &open_paths,
+                &open_runtime,
+                connection_id.as_str(),
             ) {
                 Ok(tab_name) => format!("Opened terminal: {tab_name}"),
                 Err(e) => e,
@@ -1598,7 +1778,14 @@ pub fn run() -> anyhow::Result<()> {
                     apply_tabs_to_ui(&ui, &tabs, -1);
                     // Show management view
                     let workspace = close_workspace.borrow();
-                    apply_workspace(&ui, &workspace, close_settings.as_ref(), close_logs.borrow().as_slice(), ManageMenu::Connections, "");
+                    apply_workspace(
+                        &ui,
+                        &workspace,
+                        close_settings.as_ref(),
+                        close_logs.borrow().as_slice(),
+                        ManageMenu::Connections,
+                        "",
+                    );
                 } else {
                     *active = (*active).min(tabs.len() as i32 - 1);
                     ui.set_active_tab_index(*active);
@@ -1644,12 +1831,23 @@ pub fn run() -> anyhow::Result<()> {
     let input_active = Rc::clone(&active_tab_index);
     ui.on_terminal_input(move |text, alt, control, shift, meta| {
         let active = *input_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = input_tabs.borrow_mut();
-        let Some(tab) = tabs.get_mut(active as usize) else { return; };
-        let modifiers = TerminalKeyModifiers { alt, control, shift, meta };
+        let Some(tab) = tabs.get_mut(active as usize) else {
+            return;
+        };
+        let modifiers = TerminalKeyModifiers {
+            alt,
+            control,
+            shift,
+            meta,
+        };
         if is_copy_shortcut(&text, modifiers) {
-            if let Some(contents) = tab.selected_text() { write_clipboard(contents); }
+            if let Some(contents) = tab.selected_text() {
+                write_clipboard(contents);
+            }
             return;
         }
         if is_paste_shortcut(&text, modifiers) {
@@ -1659,7 +1857,9 @@ pub fn run() -> anyhow::Result<()> {
             }
             return;
         }
-        let Some(payload) = tab.terminal.encode_key_text(&text, modifiers) else { return; };
+        let Some(payload) = tab.terminal.encode_key_text(&text, modifiers) else {
+            return;
+        };
         tab.send_terminal_input(payload);
     });
 
@@ -1668,9 +1868,13 @@ pub fn run() -> anyhow::Result<()> {
     let pd_active = Rc::clone(&active_tab_index);
     ui.on_terminal_pointer_down(move |x, y| {
         let active = *pd_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = pd_tabs.borrow_mut();
-        if let Some(tab) = tabs.get_mut(active as usize) { tab.pointer_down(x, y); }
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            tab.pointer_down(x, y);
+        }
     });
 
     // terminal-pointer-moved
@@ -1678,9 +1882,13 @@ pub fn run() -> anyhow::Result<()> {
     let pm_active = Rc::clone(&active_tab_index);
     ui.on_terminal_pointer_moved(move |x, y| {
         let active = *pm_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = pm_tabs.borrow_mut();
-        if let Some(tab) = tabs.get_mut(active as usize) { tab.pointer_moved(x, y); }
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            tab.pointer_moved(x, y);
+        }
     });
 
     // terminal-pointer-up
@@ -1688,9 +1896,13 @@ pub fn run() -> anyhow::Result<()> {
     let pu_active = Rc::clone(&active_tab_index);
     ui.on_terminal_pointer_up(move |x, y| {
         let active = *pu_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = pu_tabs.borrow_mut();
-        if let Some(tab) = tabs.get_mut(active as usize) { tab.pointer_up(x, y); }
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            tab.pointer_up(x, y);
+        }
     });
 
     // terminal-scroll
@@ -1698,9 +1910,13 @@ pub fn run() -> anyhow::Result<()> {
     let scroll_active = Rc::clone(&active_tab_index);
     ui.on_terminal_scroll(move |delta_y, x, y| {
         let active = *scroll_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = scroll_tabs.borrow_mut();
-        if let Some(tab) = tabs.get_mut(active as usize) { tab.scroll(delta_y, x, y); }
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            tab.scroll(delta_y, x, y);
+        }
     });
 
     // terminal-focus-changed
@@ -1708,9 +1924,13 @@ pub fn run() -> anyhow::Result<()> {
     let fc_active = Rc::clone(&active_tab_index);
     ui.on_terminal_focus_changed(move |focused| {
         let active = *fc_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = fc_tabs.borrow_mut();
-        if let Some(tab) = tabs.get_mut(active as usize) { tab.focus_changed(focused); }
+        if let Some(tab) = tabs.get_mut(active as usize) {
+            tab.focus_changed(focused);
+        }
     });
 
     // session-event-ready
@@ -1719,7 +1939,9 @@ pub fn run() -> anyhow::Result<()> {
     let ui_weak = ui.as_weak();
     ui.on_session_event_ready(move || {
         let active = *se_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = se_tabs.borrow_mut();
         if let Some(tab) = tabs.get_mut(active as usize) {
             let dirty = tab.drain_session_events();
@@ -1737,9 +1959,13 @@ pub fn run() -> anyhow::Result<()> {
     let timer_active = Rc::clone(&active_tab_index);
     let ui_weak = ui.as_weak();
     timer.start(TimerMode::Repeated, FRAME_INTERVAL, move || {
-        let Some(ui) = ui_weak.upgrade() else { return; };
+        let Some(ui) = ui_weak.upgrade() else {
+            return;
+        };
         let active = *timer_active.borrow();
-        if active < 0 { return; }
+        if active < 0 {
+            return;
+        }
         let mut tabs = timer_tabs.borrow_mut();
         if let Some(tab) = tabs.get_mut(active as usize) {
             let now = Instant::now();
@@ -1761,7 +1987,9 @@ pub fn run() -> anyhow::Result<()> {
             tab.disconnect("窗口关闭");
         }
     }
-    runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await; });
+    runtime.block_on(async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    });
     // Runtime will be dropped when all Rc references are dropped
     drop(runtime);
 
@@ -1780,39 +2008,62 @@ fn open_terminal_tab(
     runtime: &Rc<tokio::runtime::Runtime>,
     connection_id_str: &str,
 ) -> Result<String, String> {
-    let connection_id: i64 = connection_id_str.parse().map_err(|_| "Invalid connection ID".to_string())?;
+    let connection_id: i64 = connection_id_str
+        .parse()
+        .map_err(|_| "Invalid connection ID".to_string())?;
 
     let ws = workspace.borrow();
-    let connection = ws.connections.iter().find(|c| c.id == connection_id)
+    let connection = ws
+        .connections
+        .iter()
+        .find(|c| c.id == connection_id)
         .ok_or_else(|| "Connection not found".to_string())?
         .clone();
-    let key = ws.keys.iter().find(|k| Some(k.id) == connection.key_id).cloned();
-    let identity = ws.identities.iter().find(|i| Some(i.id) == connection.identity_id).cloned();
+    let key = ws
+        .keys
+        .iter()
+        .find(|k| Some(k.id) == connection.key_id)
+        .cloned();
+    let identity = ws
+        .identities
+        .iter()
+        .find(|i| Some(i.id) == connection.identity_id)
+        .cloned();
     let known_hosts_path = paths.known_hosts.clone();
     let terminal_themes = load_custom_terminal_themes(&paths.themes);
 
     let mut terminal_settings = settings.terminal.clone();
-    terminal_settings.colors = slint_terminal_colors_for_connection(&terminal_settings, &terminal_themes, &connection.theme_id);
+    terminal_settings.colors = slint_terminal_colors_for_connection(
+        &terminal_settings,
+        &terminal_themes,
+        &connection.theme_id,
+    );
 
     let terminal_line_height = terminal_settings.font.line_height;
     let terminal_theme = TerminalTheme::from_settings(&terminal_settings.colors);
     let terminal_font = TerminalFont::from_settings(&terminal_settings.font);
-    let mut terminal_view = TerminalView::new(TERMINAL_COLS as usize, TERMINAL_ROWS as usize, &terminal_settings);
+    let mut terminal_view = TerminalView::new(
+        TERMINAL_COLS as usize,
+        TERMINAL_ROWS as usize,
+        &terminal_settings,
+    );
 
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let pending_session_events = Arc::new(Mutex::new(VecDeque::new()));
 
-    let session = runtime.block_on(connect_target(
-        ConnectionTarget {
-            connection: connection.clone(),
-            key,
-            identity,
-            known_hosts_path,
-            cols: TERMINAL_COLS,
-            rows: TERMINAL_ROWS,
-        },
-        event_tx,
-    )).map_err(|e| format!("Connection failed: {e}"))?;
+    let session = runtime
+        .block_on(connect_target(
+            ConnectionTarget {
+                connection: connection.clone(),
+                key,
+                identity,
+                known_hosts_path,
+                cols: TERMINAL_COLS,
+                rows: TERMINAL_ROWS,
+            },
+            event_tx,
+        ))
+        .map_err(|e| format!("Connection failed: {e}"))?;
 
     terminal_view.set_outbound(session.command_tx.clone());
 
@@ -1845,14 +2096,16 @@ fn open_terminal_tab(
 }
 
 fn apply_tabs_to_ui(ui: &TimonSlintShellWindow, tabs: &[TerminalTab], active_index: i32) {
-    let tab_items: Vec<TabItem> = tabs.iter().enumerate().map(|(i, tab)| {
-        TabItem {
+    let tab_items: Vec<TabItem> = tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| TabItem {
             id: tab.id.clone().into(),
             title: tab.window_title.clone().into(),
             active: i as i32 == active_index,
             is_terminal: true,
-        }
-    }).collect();
+        })
+        .collect();
     ui.set_tabs(slint::ModelRc::new(slint::VecModel::from(tab_items)));
 }
 
@@ -1864,7 +2117,12 @@ fn sync_active_terminal_to_ui(ui: &TimonSlintShellWindow, tab: &TerminalTab) {
     ui.set_terminal_background(slint_color(tab.theme.background.rgba8()));
     ui.set_terminal_font_family(tab.font.family_name.clone().into());
     ui.set_terminal_font_size(tab.font.size);
-    ui.set_terminal_cells(snapshot_to_shell_cells(&snapshot, tab.selection.as_ref(), &tab.font, cursor_visible));
+    ui.set_terminal_cells(snapshot_to_shell_cells(
+        &snapshot,
+        tab.selection.as_ref(),
+        &tab.font,
+        cursor_visible,
+    ));
     ui.set_terminal_decorations(snapshot_to_shell_decorations(&snapshot, &tab.font));
     ui.set_cursor_overlay_visible(overlay.visible);
     ui.set_cursor_overlay_x(overlay.x);
@@ -1916,7 +2174,11 @@ fn slint_terminal_colors_for_connection(
     themes: &[TerminalThemeEntry],
     theme_id: &str,
 ) -> TerminalColors {
-    let id = if theme_id.is_empty() { &settings.default_theme_id } else { theme_id };
+    let id = if theme_id.is_empty() {
+        &settings.default_theme_id
+    } else {
+        theme_id
+    };
     if let Some(entry) = builtin_terminal_theme_by_id(id) {
         return entry.colors.clone();
     }
@@ -2720,53 +2982,6 @@ mod tests {
     }
 
     #[test]
-    fn slint_terminal_launch_uses_shell_sibling_for_standalone_shell() {
-        let current_exe = if cfg!(windows) {
-            Path::new("C:\\Timon\\TimonSlintShell.exe")
-        } else {
-            Path::new("/Applications/TimonSlintShell")
-        };
-
-        let launch = slint_terminal_launch(current_exe);
-        let expected_name = if cfg!(windows) {
-            "TimonSlintTerminal.exe"
-        } else {
-            "TimonSlintTerminal"
-        };
-
-        assert_eq!(
-            launch.executable.file_name().and_then(|name| name.to_str()),
-            Some(expected_name)
-        );
-        assert_eq!(launch.mode_arg, None);
-    }
-
-    #[test]
-    fn slint_terminal_launch_reuses_main_timon_binary_when_available() {
-        let current_exe = if cfg!(windows) {
-            Path::new("C:\\Timon\\Timon.exe")
-        } else {
-            Path::new("/Applications/Timon")
-        };
-
-        let launch = slint_terminal_launch(current_exe);
-
-        assert_eq!(launch.executable, current_exe);
-        assert_eq!(launch.mode_arg, Some(SLINT_TERMINAL_MODE_ARG));
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn slint_terminal_launch_reuses_packaged_macos_timon_binary() {
-        let current_exe = Path::new("/Applications/Timon.app/Contents/MacOS/Timon");
-
-        let launch = slint_terminal_launch(current_exe);
-
-        assert_eq!(launch.executable, current_exe);
-        assert_eq!(launch.mode_arg, Some(SLINT_TERMINAL_MODE_ARG));
-    }
-
-    #[test]
     fn launch_status_rejects_non_connection_pages_before_spawning() {
         assert_eq!(
             launch_status_for_active_menu(ManageMenu::Keychain, "7"),
@@ -2775,10 +2990,10 @@ mod tests {
     }
 
     #[test]
-    fn launch_status_rejects_missing_connection_selection_before_spawning() {
+    fn launch_status_accepts_connections_page_before_opening_tab() {
         assert_eq!(
             launch_status_for_active_menu(ManageMenu::Connections, ""),
-            "Select a connection first"
+            "Opening terminal..."
         );
     }
 

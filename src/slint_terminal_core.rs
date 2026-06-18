@@ -449,8 +449,8 @@ impl TerminalFont {
         Self {
             size,
             metrics: TerminalMetrics {
-                cell_width: (size * 0.62).max(1.0),
-                cell_height: (size * line_height).max(1.0),
+                cell_width: snap_terminal_metric(size * 0.62),
+                cell_height: snap_terminal_metric(size * line_height),
             },
             family_name: settings.family.clone(),
         }
@@ -467,8 +467,8 @@ impl TerminalFont {
         }
 
         let next_metrics = TerminalMetrics {
-            cell_width: cell_width.max(1.0),
-            cell_height: (native_cell_height * line_height.max(1.0)).max(1.0),
+            cell_width: snap_terminal_metric(cell_width),
+            cell_height: snap_terminal_metric(native_cell_height * line_height.max(1.0)),
         };
         if (self.metrics.cell_width - next_metrics.cell_width).abs() <= f32::EPSILON
             && (self.metrics.cell_height - next_metrics.cell_height).abs() <= f32::EPSILON
@@ -479,6 +479,10 @@ impl TerminalFont {
         self.metrics = next_metrics;
         true
     }
+}
+
+fn snap_terminal_metric(value: f32) -> f32 {
+    value.round().max(1.0)
 }
 
 impl TerminalColor {
@@ -1136,7 +1140,7 @@ mod tests {
         let mut font = TerminalFont::from_settings(&settings);
 
         assert!(font.apply_native_metrics(7.5, 15.0, settings.line_height));
-        assert_eq!(font.metrics.cell_width, 7.5);
+        assert_eq!(font.metrics.cell_width, 8.0);
         assert_eq!(font.metrics.cell_height, 18.0);
     }
 
